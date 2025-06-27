@@ -1,0 +1,23 @@
+{
+  "name": "shared",
+  "version": "1.0.0",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [
+    "shared",
+    "components",
+    "types",
+    "utils"
+  ],
+  "author": "Leigh Atkins",
+  "license": "MIT",
+  "description": "Shared components, types, and utilities for 3D measurement app",
+  "devDependencies": {
+    "concurrently": "^9.2.0"
+  }
+}
