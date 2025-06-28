@@ -1,8 +1,8 @@
-// File: /root/3d-measurement-app/company-dashboard/src/app/company/[subdomain]/layout.tsx
-import * as entry from '../../../../../src/app/company/[subdomain]/layout.js'
+// File: /root/3d-measurement-app/company-dashboard/app/company/[subdomain]/layout.tsx
+import * as entry from '../../../../../app/company/[subdomain]/layout.js'
 import type { ResolvingMetadata, ResolvingViewport } from 'next/dist/lib/metadata/types/metadata-interface.js'
 
-type TEntry = typeof import('../../../../../src/app/company/[subdomain]/layout.js')
+type TEntry = typeof import('../../../../../app/company/[subdomain]/layout.js')
 
 type SegmentParams<T extends Object = any> = T extends Record<string, any>
   ? { [K in keyof T]: T[K] extends string ? string | string[] | undefined : never }

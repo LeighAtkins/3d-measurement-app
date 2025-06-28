@@ -1,0 +1,30 @@
+services:
+  postgres:
+    image: postgres:13-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-password}
+      POSTGRES_DB: ${POSTGRES_DB:-app_db}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+  app:
+    image: node:18  # Using official Node image
+    working_dir: /app
+    ports:
+      - "3000:3000"  # Adjust to your app's port
+    volumes:
+      - .:/app  # Mount current directory
+      - /app/node_modules  # Keep node_modules isolated
+    environment:
+      - DATABASE_URL=postgresql://user:password@postgres:5432/app_db
+      - NODE_ENV=development
+    depends_on:
+      - postgres
+    command: sh -c "npm install && npm run dev"  # Runs your dev server
+    env_file:
+    - .env  # Loads from project root
+volumes:
+  postgres_data:

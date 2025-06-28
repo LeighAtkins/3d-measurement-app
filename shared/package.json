@@ -1,16 +1,22 @@
 {
-  "name": "shared",
+  "name": "@3d-measurement-app/shared",
   "version": "1.0.0",
-  "main": "dist/index.js",
-  "types": "dist/index.d.ts",
+  "private": true,
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    }
+  },
   "scripts": {
     "build": "tsc",
-    "dev": "tsc --watch",
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "dev": "tsc --watch"
   },
   "keywords": [
     "shared",
-    "components",
+    "components", 
     "types",
     "utils"
   ],
@@ -18,6 +24,6 @@
   "license": "MIT",
   "description": "Shared components, types, and utilities for 3D measurement app",
   "devDependencies": {
-    "concurrently": "^9.2.0"
+    "typescript": "^5"
   }
 }

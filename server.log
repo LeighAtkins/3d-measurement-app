@@ -320,3 +320,13 @@ Require stack:
 
 Node.js v18.20.8
 [31m[nodemon] app crashed - waiting for file changes before starting...[39m
+[32m[nodemon] restarting due to changes...[39m
+[32m[nodemon] starting `ts-node src/index.ts`[39m
+sh: 1: ts-node: not found
+[31m[nodemon] failed to start process, "ts-node" exec not found[39m
+[31m[nodemon] Error
+    at Bus.<anonymous> (/root/3d-measurement-app/node_modules/nodemon/lib/nodemon.js:164:25)
+    at Bus.emit (node:events:529:35)
+    at ChildProcess.<anonymous> (/root/3d-measurement-app/node_modules/nodemon/lib/monitor/run.js:199:11)
+    at ChildProcess.emit (node:events:517:28)
+    at ChildProcess._handle.onexit (node:internal/child_process:292:12)[39m

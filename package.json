@@ -1,0 +1,40 @@
+{
+  "name": "3d-measurement-app",
+  "private": true,
+  "scripts": {
+    "dev": "concurrently \"npm:dev-*\"",
+    "dev-client": "cd client-portal && npm run dev",
+    "dev-api": "cd api-server && npm run dev",
+    "dev-dashboard": "cd company-dashboard && npm run dev",
+    "dev-mobile": "cd mobile-input && echo 'Mobile input not implemented yet'",
+    "start": "npm run dev",
+    "setup": "./scripts/setup.sh",
+    "build-packages": "cd shared && npm run build && cd ../packages/api-client && npm run build && cd ../3d-tools && npm run build",
+    "health": "curl -s http://localhost:8000/health | jq . || curl -s http://localhost:8000/health"
+  },
+  "workspaces": [
+    "client-portal",
+    "api-server",
+    "company-dashboard",
+    "mobile-input",
+    "shared",
+    "packages/*"
+  ],
+  "version": "1.0.0",
+  "main": "index.js",
+  "directories": {
+    "doc": "docs"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "description": "",
+  "devDependencies": {
+    "@playwright/test": "^1.53.1",
+    "concurrently": "^9.2.0",
+    "playwright": "^1.53.1"
+  },
+  "dependencies": {
+    "dotenv": "^16.6.1"
+  }
+}
