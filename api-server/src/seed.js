@@ -72,11 +72,19 @@ async function seed() {
       ['admin@acme.com', adminPassword, 'COMPANY_ADMIN', companyId]
     );
 
-    // Insert a demo client user
+    // Insert demo client users
     const clientPassword = await bcrypt.hash('client123', 10);
     await client.query(
-      "INSERT INTO users (email, password_hash, role) VALUES ($1, $2, $3) ON CONFLICT (email) DO NOTHING",
-      ['client1@example.com', clientPassword, 'CLIENT']
+      "INSERT INTO users (id, email, password_hash, role) VALUES ($1, $2, $3, $4) ON CONFLICT (email) DO NOTHING",
+      ['550e8400-e29b-41d4-a716-446655440002', 'client1@example.com', clientPassword, 'CLIENT']
+    );
+    await client.query(
+      "INSERT INTO users (id, email, password_hash, role) VALUES ($1, $2, $3, $4) ON CONFLICT (email) DO NOTHING",
+      ['550e8400-e29b-41d4-a716-446655440003', 'client2@example.com', clientPassword, 'CLIENT']
+    );
+    await client.query(
+      "INSERT INTO users (id, email, password_hash, role) VALUES ($1, $2, $3, $4) ON CONFLICT (email) DO NOTHING",
+      ['550e8400-e29b-41d4-a716-446655440004', 'client3@example.com', clientPassword, 'CLIENT']
     );
 
     console.log('Database seeded successfully');

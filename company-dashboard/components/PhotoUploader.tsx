@@ -1,7 +1,8 @@
 'use client'
 
-import { useState, useCallback } from 'react'
+import { useState, useCallback, useEffect } from 'react'
 import { useDropzone } from 'react-dropzone'
+import { validatePhoto, PhotoValidation, getRecommendedSelection } from '../utils/photoValidation'
 
 interface PhotoUploaderProps {
   onPhotosSelected: (files: File[]) => void
@@ -14,6 +15,9 @@ interface PhotoUploaderProps {
 interface PhotoPreview {
   file: File
   preview: string
+  validation?: PhotoValidation
+  selected: boolean
+  validating: boolean
 }
 
 export default function PhotoUploader({ 
@@ -48,7 +52,7 @@ export default function PhotoUploader({
     return errors
   }
 
-  const onDrop = useCallback((acceptedFiles: File[]) => {
+  const onDrop = useCallback(async (acceptedFiles: File[]) => {
     const allErrors: string[] = []
     const validFiles: File[] = []
     
@@ -72,28 +76,113 @@ export default function PhotoUploader({
     setErrors(allErrors)
     
     if (validFiles.length > 0) {
-      // Create previews
-      const newPreviews = validFiles.map(file => ({
+      // Create previews with validation placeholders
+      const newPreviews: PhotoPreview[] = validFiles.map(file => ({
         file,
-        preview: URL.createObjectURL(file)
+        preview: URL.createObjectURL(file),
+        selected: true, // Pre-select all initially
+        validating: true
       }))
       
       const updatedPhotos = [...photos, ...newPreviews]
       setPhotos(updatedPhotos)
       
-      // Notify parent component
-      onPhotosSelected(updatedPhotos.map(p => p.file))
+      // Start validation for new photos
+      validateNewPhotos(validFiles, photos.length)
     }
-  }, [photos, maxFiles, existingPhotos.length, onPhotosSelected])
+  }, [photos, maxFiles, existingPhotos.length])
+
+  const validateNewPhotos = async (files: File[], startIndex: number) => {
+    for (let i = 0; i < files.length; i++) {
+      const fileIndex = startIndex + i
+      
+      try {
+        const validation = await validatePhoto(files[i])
+        
+        setPhotos(prev => prev.map((photo, idx) => 
+          idx === fileIndex 
+            ? { ...photo, validation, validating: false }
+            : photo
+        ))
+      } catch (error) {
+        console.error('Validation failed for photo:', error)
+        setPhotos(prev => prev.map((photo, idx) => 
+          idx === fileIndex 
+            ? { ...photo, validating: false }
+            : photo
+        ))
+      }
+    }
+    
+    // Auto-select based on validation results after all validations complete
+    setTimeout(() => {
+      setPhotos(prev => {
+        const validations = prev.map(p => p.validation).filter(Boolean) as PhotoValidation[]
+        const recommendedIndices = getRecommendedSelection(validations)
+        
+        return prev.map((photo, idx) => ({
+          ...photo,
+          selected: Boolean(photo.validation?.status === 'good' || 
+                   (recommendedIndices.length === 0 && photo.validation?.canProceed))
+        }))
+      })
+    }, 100)
+  }
+
+  // Update parent when selection changes
+  useEffect(() => {
+    const selectedFiles = photos.filter(p => p.selected).map(p => p.file)
+    onPhotosSelected(selectedFiles)
+  }, [photos, onPhotosSelected])
 
   const removePhoto = (index: number) => {
     const updatedPhotos = photos.filter((_, i) => i !== index)
     setPhotos(updatedPhotos)
-    onPhotosSelected(updatedPhotos.map(p => p.file))
     
     // Clear errors when removing files
     if (updatedPhotos.length < maxFiles) {
       setErrors([])
+    }
+  }
+
+  const removeSelectedPhotos = () => {
+    const updatedPhotos = photos.filter(p => !p.selected)
+    setPhotos(updatedPhotos)
+    
+    // Clear errors when removing files
+    if (updatedPhotos.length < maxFiles) {
+      setErrors([])
+    }
+  }
+
+  const selectAllPhotos = () => {
+    setPhotos(prev => prev.map(photo => ({ ...photo, selected: true })))
+  }
+
+  const deselectAllPhotos = () => {
+    setPhotos(prev => prev.map(photo => ({ ...photo, selected: false })))
+  }
+
+  const togglePhotoSelection = (index: number) => {
+    setPhotos(prev => prev.map((photo, idx) => 
+      idx === index ? { ...photo, selected: !photo.selected } : photo
+    ))
+  }
+
+  const getQualityIcon = (status: 'good' | 'warning' | 'poor' | undefined, validating: boolean) => {
+    if (validating) {
+      return <div className="w-4 h-4 border-2 border-blue-500 border-t-transparent rounded-full animate-spin" />
+    }
+    
+    switch (status) {
+      case 'good':
+        return <div className="w-4 h-4 bg-green-500 rounded-full flex items-center justify-center text-white text-xs">✓</div>
+      case 'warning':
+        return <div className="w-4 h-4 bg-yellow-500 rounded-full flex items-center justify-center text-white text-xs">!</div>
+      case 'poor':
+        return <div className="w-4 h-4 bg-red-500 rounded-full flex items-center justify-center text-white text-xs">×</div>
+      default:
+        return null
     }
   }
 
@@ -203,7 +292,10 @@ export default function PhotoUploader({
               <div>
                 <p className="font-medium">Click to upload or drag and drop</p>
                 <p>JPEG, PNG, WebP (max 10MB each)</p>
-                <p className="text-xs text-gray-500 mt-1">
+                <p className="text-xs text-red-600 font-medium mt-1">
+                  Minimum size: 512x512 pixels required
+                </p>
+                <p className="text-xs text-gray-500">
                   {photos.length + existingPhotos.length}/{maxFiles} photos
                 </p>
               </div>
@@ -227,32 +319,172 @@ export default function PhotoUploader({
       {/* Photo Previews */}
       {photos.length > 0 && (
         <div className="space-y-3">
-          <h4 className="text-sm font-medium text-gray-900">Selected Photos ({photos.length})</h4>
+          <div className="flex items-center justify-between">
+            <h4 className="text-sm font-medium text-gray-900">
+              Photos ({photos.filter(p => p.selected).length}/{photos.length} selected)
+            </h4>
+            
+            <div className="flex items-center space-x-3">
+              {/* Bulk Actions */}
+              {photos.length > 1 && (
+                <div className="flex items-center space-x-2">
+                  <button
+                    onClick={selectAllPhotos}
+                    className="text-xs text-blue-600 hover:text-blue-800 underline"
+                  >
+                    Select All
+                  </button>
+                  <button
+                    onClick={deselectAllPhotos}
+                    className="text-xs text-gray-600 hover:text-gray-800 underline"
+                  >
+                    Deselect All
+                  </button>
+                  {photos.some(p => p.selected) && (
+                    <button
+                      onClick={removeSelectedPhotos}
+                      className="text-xs text-red-600 hover:text-red-800 underline font-medium"
+                    >
+                      Delete Selected ({photos.filter(p => p.selected).length})
+                    </button>
+                  )}
+                </div>
+              )}
+              
+              {/* Quality Legend */}
+              <div className="flex items-center space-x-2 text-xs text-gray-600">
+                <div className="flex items-center space-x-1">
+                  <div className="w-3 h-3 bg-green-500 rounded-full"></div>
+                  <span>Good</span>
+                </div>
+                <div className="flex items-center space-x-1">
+                  <div className="w-3 h-3 bg-yellow-500 rounded-full"></div>
+                  <span>Warning</span>
+                </div>
+                <div className="flex items-center space-x-1">
+                  <div className="w-3 h-3 bg-red-500 rounded-full"></div>
+                  <span>Poor</span>
+                </div>
+              </div>
+            </div>
+          </div>
+          
           <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-3">
             {photos.map((photo, index) => (
               <div key={index} className="relative group">
-                <div className="aspect-square bg-gray-100 rounded-lg overflow-hidden">
+                <div 
+                  className={`aspect-square bg-gray-100 rounded-lg overflow-hidden border-2 transition-colors ${
+                    photo.selected 
+                      ? 'border-blue-500' 
+                      : 'border-transparent hover:border-gray-300'
+                  }`}
+                >
                   <img
                     src={photo.preview}
                     alt={`Preview ${index + 1}`}
                     className="w-full h-full object-cover"
                   />
+                  
+                  {/* Quality indicator overlay */}
+                  <div className="absolute top-2 left-2">
+                    {getQualityIcon(photo.validation?.status, photo.validating)}
+                  </div>
+                  
+                  {/* Selection checkbox */}
+                  <div className="absolute top-2 right-2">
+                    <button
+                      onClick={() => togglePhotoSelection(index)}
+                      className={`w-5 h-5 rounded border-2 flex items-center justify-center transition-colors ${
+                        photo.selected
+                          ? 'bg-blue-500 border-blue-500 text-white'
+                          : 'bg-white border-gray-300 hover:border-gray-400'
+                      }`}
+                      type="button"
+                    >
+                      {photo.selected && <span className="text-xs">✓</span>}
+                    </button>
+                  </div>
                 </div>
                 
                 <button
                   onClick={() => removePhoto(index)}
-                  className="absolute -top-2 -right-2 bg-red-500 text-white rounded-full w-6 h-6 flex items-center justify-center text-xs hover:bg-red-600 transition-colors"
+                  className="absolute -top-2 -left-2 bg-red-500 text-white rounded-full w-6 h-6 flex items-center justify-center text-xs hover:bg-red-600 transition-colors z-10"
                   type="button"
                 >
                   ×
                 </button>
                 
-                <div className="absolute bottom-0 left-0 right-0 bg-black bg-opacity-50 text-white text-xs p-1 rounded-b-lg">
-                  {photo.file.name}
+                <div className="mt-2 space-y-1">
+                  <div className="text-xs text-gray-700 truncate" title={photo.file.name}>
+                    {photo.file.name}
+                  </div>
+                  
+                  {photo.validation && !photo.validating && (
+                    <div className="text-xs">
+                      <div className={`font-medium ${
+                        photo.validation.status === 'good' ? 'text-green-600' :
+                        photo.validation.status === 'warning' ? 'text-yellow-600' : 'text-red-600'
+                      }`}>
+                        {photo.validation.status === 'good' && '🟢 Good quality'}
+                        {photo.validation.status === 'warning' && '🟡 Has issues'}
+                        {photo.validation.status === 'poor' && '🔴 Poor quality'}
+                      </div>
+                      
+                      {photo.validation.issues.length > 0 && (
+                        <div className="text-gray-500 mt-1">
+                          {photo.validation.issues.slice(0, 2).map((issue, i) => (
+                            <div key={i}>• {issue}</div>
+                          ))}
+                          {photo.validation.issues.length > 2 && (
+                            <div>• +{photo.validation.issues.length - 2} more...</div>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  )}
+                  
+                  {photo.validating && (
+                    <div className="text-xs text-gray-500">
+                      Analyzing quality...
+                    </div>
+                  )}
                 </div>
               </div>
             ))}
           </div>
+          
+          {/* Quality summary */}
+          {photos.some(p => p.validation && !p.validating) && (
+            <div className="bg-gray-50 border border-gray-200 rounded-lg p-3">
+              <h5 className="text-sm font-medium text-gray-900 mb-2">Quality Summary</h5>
+              <div className="grid grid-cols-3 gap-4 text-xs">
+                <div className="text-center">
+                  <div className="text-green-600 font-medium">
+                    {photos.filter(p => p.validation?.status === 'good').length}
+                  </div>
+                  <div className="text-gray-600">Good</div>
+                </div>
+                <div className="text-center">
+                  <div className="text-yellow-600 font-medium">
+                    {photos.filter(p => p.validation?.status === 'warning').length}
+                  </div>
+                  <div className="text-gray-600">Warning</div>
+                </div>
+                <div className="text-center">
+                  <div className="text-red-600 font-medium">
+                    {photos.filter(p => p.validation?.status === 'poor').length}
+                  </div>
+                  <div className="text-gray-600">Poor</div>
+                </div>
+              </div>
+              
+              {photos.filter(p => p.selected && p.validation?.status === 'poor').length > 0 && (
+                <div className="mt-2 p-2 bg-red-50 border border-red-200 rounded text-xs text-red-700">
+                  ⚠️ You have selected photos with poor quality. This may result in failed generation or low-quality 3D models.
+                </div>
+              )}
+            </div>
+          )}
         </div>
       )}
 

@@ -10,7 +10,7 @@ interface Order {
   id: string
   title: string
   description?: string
-  modelUrl?: string
+  model_url?: string
   status: string
 }
 
@@ -171,7 +171,7 @@ export default function ClientMeasurementsPage() {
               Click on the model to select points for custom measurements, or click on the dimension labels (Width, Height, Depth) to use automatic measurements.
             </p>
             <ModelViewer
-              modelUrl={order.modelUrl || '/sample-models/cube.glb'}
+              modelUrl={order.model_url || '/sample-models/cube.glb'}
               className="w-full h-96 rounded-lg border border-gray-200"
               onPointClick={handlePointClick}
               onDimensionClick={handleDimensionClick}

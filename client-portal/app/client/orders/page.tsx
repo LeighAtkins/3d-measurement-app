@@ -10,7 +10,7 @@ interface Order {
   status: string
   assignedAt: string
   description?: string
-  modelUrl?: string
+  model_url?: string
 }
 
 export default function ClientOrdersPage() {
@@ -122,7 +122,7 @@ export default function ClientOrdersPage() {
 
                 <div className="mt-6 flex justify-between items-center">
                   <div className="flex items-center text-sm text-gray-500">
-                    {order.modelUrl ? (
+                    {order.model_url ? (
                       <span className="text-green-600">✓ 3D Model Available</span>
                     ) : (
                       <span className="text-gray-400">No 3D Model</span>

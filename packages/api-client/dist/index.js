@@ -16,17 +16,33 @@ export class ApiClient {
             localStorage.removeItem('token');
         }
     }
+    getToken() {
+        return this.token;
+    }
     async makeRequest(url, options = {}) {
         const headers = new Headers(options.headers);
         if (this.token) {
             headers.set('Authorization', `Bearer ${this.token}`);
         }
         headers.set('Content-Type', 'application/json');
+        console.log('ApiClient making request:', {
+            url: `${this.baseUrl}${url}`,
+            method: options.method || 'GET',
+            hasToken: !!this.token,
+            body: options.body ? 'Present' : 'None'
+        });
         const response = await fetch(`${this.baseUrl}${url}`, {
             ...options,
             headers,
         });
+        console.log('ApiClient response:', {
+            status: response.status,
+            statusText: response.statusText,
+            ok: response.ok
+        });
         if (!response.ok) {
+            const errorText = await response.text().catch(() => 'Unknown error');
+            console.error('ApiClient error details:', errorText);
             throw new Error(`HTTP ${response.status}: ${response.statusText}`);
         }
         return response.json();
@@ -99,6 +115,68 @@ export class ApiClient {
         return this.request(`/api/orders/${orderId}/measurements/${measurementId}`, {
             method: 'DELETE',
         });
+    }
+    // Photos
+    async getOrderPhotos(orderId) {
+        return this.request(`/api/furniture/photos/${orderId}`);
+    }
+    async addPhotosToOrder(orderId, files) {
+        const formData = new FormData();
+        files.forEach(file => {
+            formData.append('photos', file);
+        });
+        return fetch(`${this.baseUrl}/api/orders/${orderId}/photos`, {
+            method: 'POST',
+            headers: {
+                'Authorization': `Bearer ${this.token}`,
+            },
+            body: formData,
+        }).then(response => {
+            if (!response.ok) {
+                throw new Error(`HTTP error! status: ${response.status}`);
+            }
+            return response.json();
+        });
+    }
+    async deletePhoto(photoId) {
+        return this.request(`/api/photos/${photoId}`, {
+            method: 'DELETE',
+        });
+    }
+    async bulkDeletePhotos(orderId, photoIds) {
+        return this.request(`/api/orders/${orderId}/photos`, {
+            method: 'DELETE',
+            body: JSON.stringify({ photoIds }),
+        });
+    }
+    async regenerateWithPhotos(orderId, photoIds, photoSetName) {
+        return this.request(`/api/orders/${orderId}/regenerate`, {
+            method: 'POST',
+            body: JSON.stringify({ photoIds, photoSetName }),
+        });
+    }
+    // Photo Set Management
+    async getPhotoSets(orderId) {
+        return this.request(`/api/orders/${orderId}/photo-sets`);
+    }
+    async createPhotoSet(orderId, name, photoIds) {
+        return this.request(`/api/orders/${orderId}/photo-sets`, {
+            method: 'POST',
+            body: JSON.stringify({ name, photoIds }),
+        });
+    }
+    async updatePhotoSet(photoSetId, photoIds) {
+        return this.request(`/api/photo-sets/${photoSetId}/photos`, {
+            method: 'PUT',
+            body: JSON.stringify({ photoIds }),
+        });
+    }
+    async getGenerationAttemptPhotos(attemptId) {
+        return this.request(`/api/generation-attempts/${attemptId}/photos`);
+    }
+    // GPU Quota
+    async getGPUQuota() {
+        return this.request('/api/gpu/quota');
     }
 }
 // Utility function to check token expiry

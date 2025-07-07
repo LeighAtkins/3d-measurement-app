@@ -1,4 +1,4 @@
-// This is an ES module
+// This is an ES module - Updated with TRELLIS fixes and photo set response fix
 import { fileURLToPath } from "url";
 import { dirname, join } from "path";
 import { config } from "dotenv";
@@ -18,14 +18,29 @@ import { validate, validateUUID, rateLimit, schemas } from './validation.js';
 import meshy from './meshy.js';
 import r2 from './r2.js';
 import TRELLISService from './trellis.js';
+import { GPUQuotaService } from './gpuQuotaService.js';
+import { VersionService } from './versionService.js';
+import versionRoutes, { checkVersionLimits } from './routes/versions.js';
 import multer from 'multer';
 // Fallback to in-memory data when database is not available
 let useDatabase = true;
 let db;
+let gpuQuotaService;
+let versionService;
 
 import dbTest from './routes/db-test.js';
 try {
-  db = (await import('./db.js')).default || (await import('./db.js'));
+  const dbModule = await import('./db.js');
+  db = dbModule.default || dbModule;
+  logger.info('Database module loaded successfully');
+  
+  // Initialize GPU quota service
+  gpuQuotaService = new GPUQuotaService(db);
+  logger.info('GPU quota service initialized');
+  
+  // Initialize version service
+  versionService = new VersionService(db);
+  logger.info('Version service initialized');
 } catch (error) {
   logger.warn('Database not available, falling back to in-memory store', { error: error?.message });
   useDatabase = false;
@@ -34,20 +49,36 @@ try {
 // In-memory data store for fallback
 const users = [
   {
-    id: '1',
+    id: '550e8400-e29b-41d4-a716-446655440000',
     email: 'admin@acme.com',
     password: '$2a$10$QM9eHpG3GwHhOFP9nLvAIuTS4YXUWNWBWEq9Lneayoc74J/BD5fyC', // password: admin123
     role: 'COMPANY_ADMIN',
+    company_id: '733d2936-521b-402b-b0ef-97f29c2326af',
     company: {
       subdomain: 'acme',
       name: 'Acme Corp'
     }
   },
   {
-    id: '2',
+    id: '550e8400-e29b-41d4-a716-446655440002',
     email: 'client1@example.com',
     password: '$2a$10$Qb9OR8X8w5eMzK3RFLS5E.no7eTzFmHPd5R7CZJM6orqHc/0mFHge', // password: client123
-    role: 'CLIENT'
+    role: 'CLIENT',
+    company_id: null
+  },
+  {
+    id: '550e8400-e29b-41d4-a716-446655440003',
+    email: 'client2@example.com',
+    password: '$2a$10$Qb9OR8X8w5eMzK3RFLS5E.no7eTzFmHPd5R7CZJM6orqHc/0mFHge', // password: client123
+    role: 'CLIENT',
+    company_id: null
+  },
+  {
+    id: '550e8400-e29b-41d4-a716-446655440004',
+    email: 'client3@example.com',
+    password: '$2a$10$Qb9OR8X8w5eMzK3RFLS5E.no7eTzFmHPd5R7CZJM6orqHc/0mFHge', // password: client123
+    role: 'CLIENT',
+    company_id: null
   }
 ];
 
@@ -113,7 +144,47 @@ const measurements = [
 
 const app = express();
 const PORT = process.env.PORT || 8000;
-const JWT_SECRET = process.env.JWT_SECRET || 'your-secret-key-for-mvp';
+if (!process.env.JWT_SECRET) {
+  console.error('FATAL: JWT_SECRET environment variable is required');
+  process.exit(1);
+}
+const JWT_SECRET = process.env.JWT_SECRET;
+
+// Helper function to transform external model URLs to proxy URLs
+function transformModelUrl(modelUrl, baseUrl = 'http://localhost:8000') {
+  if (!modelUrl) return modelUrl;
+  
+  // Check if it's an external URL that needs proxying
+  const externalDomains = [
+    'viverse-backend.onrender.com',
+    'huggingface.co',
+    'hf.co'
+  ];
+  
+  try {
+    const urlObj = new URL(modelUrl);
+    if (externalDomains.includes(urlObj.hostname)) {
+      // Transform to proxy URL
+      return `${baseUrl}/api/models/proxy?url=${encodeURIComponent(modelUrl)}`;
+    }
+  } catch (error) {
+    // If URL parsing fails, return original
+    logger.warn('Failed to parse model URL', { modelUrl, error: error.message });
+  }
+  
+  return modelUrl;
+}
+
+// Helper function to transform order data
+function transformOrderData(order, req) {
+  if (!order) return order;
+  
+  const baseUrl = `${req.protocol}://${req.get('host')}`;
+  return {
+    ...order,
+    model_url: transformModelUrl(order.model_url, baseUrl)
+  };
+}
 
 app.use((req, res, next) => {
   const hostname = req.headers.host.split(':')[0];
@@ -141,15 +212,27 @@ const upload = multer({
   }
 });
 
-// Initialize TRELLIS service
+// Initialize services
 const trellisService = new TRELLISService();
 
 // Middleware
-app.use(cors());
+app.use(cors({
+  origin: ['http://localhost:3001', 'http://localhost:3000', 'http://localhost:3002'],
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization']
+}));
 app.use(express.json({ limit: '10mb' })); // Increase limit for 3D models
 app.use(requestLogger); // Add request logging
 app.use(rateLimit()); // Basic rate limiting
 app.use('/api', dbTest);
+
+// Make database and services available to routes
+app.locals.db = db;
+app.locals.gpuQuotaService = gpuQuotaService;
+
+// Add version management routes
+app.use('/api', versionRoutes);
 
 
 // Auth middleware
@@ -162,11 +245,18 @@ const authenticateToken = async (req, res, next) => {
   }
 
   try {
-  db = (await import('./db.js')).default || (await import('./db.js'));
     const decoded = jwt.verify(token, JWT_SECRET);
     req.user = decoded;
 
-    await db.query(`SET LOCAL request.jwt.claims = '${JSON.stringify(decoded)}'`);
+    // Only set JWT claims if using database and RLS is enabled
+    if (useDatabase && db) {
+      try {
+        await db.query(`SET LOCAL request.jwt.claims = '${JSON.stringify(decoded)}'`);
+      } catch (dbError) {
+        // Log but don't fail request if setting claims fails
+        logger.warn('Failed to set JWT claims', { error: dbError.message });
+      }
+    }
 
     next();
   } catch (error) {
@@ -179,7 +269,6 @@ const authenticateToken = async (req, res, next) => {
 // Auth
 app.post('/api/auth/login', validate(schemas.login), async (req, res) => {
   try {
-  db = (await import('./db.js')).default || (await import('./db.js'));
     const { email, password } = req.body;
     let user;
 
@@ -244,7 +333,6 @@ app.post('/api/auth/login', validate(schemas.login), async (req, res) => {
 // Orders
 app.get('/api/orders', authenticateToken, async (req, res) => {
   try {
-  db = (await import('./db.js')).default || (await import('./db.js'));
     let query;
     const params = [];
 
@@ -259,7 +347,8 @@ app.get('/api/orders', authenticateToken, async (req, res) => {
     }
 
     const result = await db.query(query, params);
-    res.json(result.rows);
+    const transformedOrders = result.rows.map(order => transformOrderData(order, req));
+    res.json(transformedOrders);
   } catch (error) {
     logger.error('Error in endpoint', { error: error.message, stack: error.stack });
     res.status(500).json({ error: 'Server error' });
@@ -268,7 +357,6 @@ app.get('/api/orders', authenticateToken, async (req, res) => {
 
 app.get('/api/orders/:id', authenticateToken, async (req, res) => {
   try {
-  db = (await import('./db.js')).default || (await import('./db.js'));
     const result = await db.query('SELECT * FROM orders WHERE id = $1', [req.params.id]);
     const order = result.rows[0];
 
@@ -282,16 +370,115 @@ app.get('/api/orders/:id', authenticateToken, async (req, res) => {
       return res.status(403).json({ error: 'Access denied' });
     }
 
-    res.json(order);
+    res.json(transformOrderData(order, req));
   } catch (error) {
     logger.error('Error in endpoint', { error: error.message, stack: error.stack });
     res.status(500).json({ error: 'Server error' });
   }
 });
 
+// Model proxy endpoint to bypass CORS for external 3D models
+app.get('/api/models/proxy', async (req, res) => {
+  try {
+    const { url } = req.query;
+    
+    if (!url) {
+      return res.status(400).json({ error: 'URL parameter is required' });
+    }
+    
+    // Validate that it's a GLB/GLTF model URL
+    if (!url.match(/\.(glb|gltf)(\?.*)?$/i)) {
+      return res.status(400).json({ error: 'Only GLB and GLTF models are supported' });
+    }
+    
+    // Only allow specific domains for security
+    const allowedDomains = [
+      'viverse-backend.onrender.com',
+      'huggingface.co',
+      'hf.co'
+    ];
+    
+    const urlObj = new URL(url);
+    if (!allowedDomains.includes(urlObj.hostname)) {
+      return res.status(400).json({ error: 'Domain not allowed' });
+    }
+    
+    logger.info('Proxying 3D model request', { url });
+    
+    const response = await fetch(url);
+    
+    if (!response.ok) {
+      logger.error('Failed to fetch model', { url, status: response.status });
+      return res.status(response.status).json({ error: 'Failed to fetch model' });
+    }
+    
+    // Get the model data as buffer
+    const modelBuffer = await response.arrayBuffer();
+    
+    // Set appropriate headers for GLB files
+    res.set({
+      'Content-Type': 'model/gltf-binary',
+      'Access-Control-Allow-Origin': '*',
+      'Cache-Control': 'public, max-age=3600',
+      'Content-Length': modelBuffer.byteLength.toString(),
+      'Content-Disposition': 'inline; filename="model.glb"'
+    });
+    
+    // Send the model data
+    res.send(Buffer.from(modelBuffer));
+    
+  } catch (error) {
+    logger.error('Model proxy error', { error: error.message, stack: error.stack });
+    res.status(500).json({ error: 'Proxy error' });
+  }
+});
+
+// Direct model serving endpoint for orders (public access for 3D viewer)
+app.get('/api/orders/:id/model', async (req, res) => {
+  try {
+    const { id } = req.params;
+    
+    // Get the order with model URL
+    const result = await db.query('SELECT model_url FROM orders WHERE id = $1', [id]);
+    const order = result.rows[0];
+    
+    if (!order || !order.model_url) {
+      return res.status(404).json({ error: 'Model not found' });
+    }
+    
+    logger.info('Serving model for order', { orderId: id, modelUrl: order.model_url });
+    
+    // Fetch the model from external URL
+    const response = await fetch(order.model_url);
+    
+    if (!response.ok) {
+      logger.error('Failed to fetch model', { modelUrl: order.model_url, status: response.status });
+      return res.status(response.status).json({ error: 'Failed to fetch model' });
+    }
+    
+    // Get the model data as buffer
+    const modelBuffer = await response.arrayBuffer();
+    
+    // Set appropriate headers for GLB files
+    res.set({
+      'Content-Type': 'model/gltf-binary',
+      'Access-Control-Allow-Origin': '*',
+      'Cache-Control': 'public, max-age=3600',
+      'Content-Length': modelBuffer.byteLength.toString(),
+      'Content-Disposition': 'inline; filename="model.glb"'
+    });
+    
+    // Send the model data
+    res.send(Buffer.from(modelBuffer));
+    
+  } catch (error) {
+    logger.error('Model serving error', { error: error.message, stack: error.stack });
+    res.status(500).json({ error: 'Model serving error' });
+  }
+});
+
 app.post('/api/orders', authenticateToken, validate(schemas.createOrder), async (req, res) => {
   try {
-  db = (await import('./db.js')).default || (await import('./db.js'));
     if (!req.user.role.startsWith('COMPANY_')) {
       return res.status(403).json({ error: 'Access denied' });
     }
@@ -302,7 +489,7 @@ app.post('/api/orders', authenticateToken, validate(schemas.createOrder), async 
       [title, description, status, model_url, req.user.company_id, assigned_client_id]
     );
 
-    res.status(201).json(result.rows[0]);
+    res.status(201).json(transformOrderData(result.rows[0], req));
   } catch (error) {
     logger.error('Error in endpoint', { error: error.message, stack: error.stack });
     res.status(500).json({ error: 'Server error' });
@@ -311,18 +498,47 @@ app.post('/api/orders', authenticateToken, validate(schemas.createOrder), async 
 
 app.put('/api/orders/:id', authenticateToken, validateUUID('id'), validate(schemas.updateOrder), async (req, res) => {
   try {
-  db = (await import('./db.js')).default || (await import('./db.js'));
     const { title, description, status, model_url, assigned_client_id } = req.body;
+    
+    // Build dynamic update query with only provided fields
+    const updates = [];
+    const values = [];
+    let paramCount = 1;
+    
+    if (title !== undefined) {
+      updates.push(`title = $${paramCount++}`);
+      values.push(title);
+    }
+    if (description !== undefined) {
+      updates.push(`description = $${paramCount++}`);
+      values.push(description);
+    }
+    if (status !== undefined) {
+      updates.push(`status = $${paramCount++}`);
+      values.push(status);
+    }
+    if (model_url !== undefined) {
+      updates.push(`model_url = $${paramCount++}`);
+      values.push(model_url);
+    }
+    if (assigned_client_id !== undefined) {
+      updates.push(`assigned_client_id = $${paramCount++}`);
+      values.push(assigned_client_id);
+    }
+    
+    updates.push(`updated_at = NOW()`);
+    values.push(req.params.id, req.user.company_id);
+    
     const result = await db.query(
-      'UPDATE orders SET title = $1, description = $2, status = $3, model_url = $4, assigned_client_id = $5, updated_at = NOW() WHERE id = $6 AND company_id = $7 RETURNING *',
-      [title, description, status, model_url, assigned_client_id, req.params.id, req.user.company_id]
+      `UPDATE orders SET ${updates.join(', ')} WHERE id = $${paramCount++} AND company_id = $${paramCount++} RETURNING *`,
+      values
     );
 
     if (result.rows.length === 0) {
       return res.status(404).json({ error: 'Order not found or access denied' });
     }
 
-    res.json(result.rows[0]);
+    res.json(transformOrderData(result.rows[0], req));
   } catch (error) {
     logger.error('Error in endpoint', { error: error.message, stack: error.stack });
     res.status(500).json({ error: 'Server error' });
@@ -332,7 +548,6 @@ app.put('/api/orders/:id', authenticateToken, validateUUID('id'), validate(schem
 // Measurements
 app.get('/api/orders/:orderId/measurements', authenticateToken, async (req, res) => {
   try {
-  db = (await import('./db.js')).default || (await import('./db.js'));
     const orderResult = await db.query('SELECT * FROM orders WHERE id = $1', [req.params.orderId]);
     const order = orderResult.rows[0];
 
@@ -356,7 +571,6 @@ app.get('/api/orders/:orderId/measurements', authenticateToken, async (req, res)
 
 app.post('/api/orders/:orderId/measurements', authenticateToken, validateUUID('orderId'), validate(schemas.createMeasurement), async (req, res) => {
   try {
-  db = (await import('./db.js')).default || (await import('./db.js'));
     const orderResult = await db.query('SELECT * FROM orders WHERE id = $1', [req.params.orderId]);
     const order = orderResult.rows[0];
 
@@ -385,7 +599,6 @@ app.post('/api/orders/:orderId/measurements', authenticateToken, validateUUID('o
 
 app.put('/api/orders/:orderId/measurements/:id', authenticateToken, validateUUID('orderId'), validateUUID('id'), validate(schemas.updateMeasurement), async (req, res) => {
   try {
-  db = (await import('./db.js')).default || (await import('./db.js'));
     const { label, value, unit, start_point, end_point, notes } = req.body;
     const result = await db.query(
       'UPDATE measurements SET label = $1, value = $2, unit = $3, start_point = $4, end_point = $5, notes = $6, updated_at = NOW() WHERE id = $7 AND order_id = $8 RETURNING *',
@@ -405,7 +618,6 @@ app.put('/api/orders/:orderId/measurements/:id', authenticateToken, validateUUID
 
 app.delete('/api/orders/:orderId/measurements/:id', authenticateToken, async (req, res) => {
   try {
-  db = (await import('./db.js')).default || (await import('./db.js'));
     const result = await db.query('DELETE FROM measurements WHERE id = $1 AND order_id = $2', [req.params.id, req.params.orderId]);
 
     if (result.rowCount === 0) {
@@ -421,7 +633,6 @@ app.delete('/api/orders/:orderId/measurements/:id', authenticateToken, async (re
 
 app.post('/api/orders/:id/generate-model', authenticateToken, validateUUID('id'), validate(schemas.generate3D), async (req, res) => {
   try {
-  db = (await import('./db.js')).default || (await import('./db.js'));
     const { prompt } = req.body;
     const orderId = req.params.id;
 
@@ -448,7 +659,6 @@ app.post('/api/orders/:id/generate-model', authenticateToken, validateUUID('id')
 
 app.post('/api/orders/:id/upload-model', authenticateToken, r2.upload.single('model'), async (req, res) => {
   try {
-  db = (await import('./db.js')).default || (await import('./db.js'));
     const orderId = req.params.id;
     const modelKey = await r2.uploadFile(req.file);
     const modelUrl = await r2.getSignedUrl(modelKey);
@@ -471,8 +681,7 @@ app.post('/api/furniture/upload-photos/:orderId',
   upload.array('photos', 5),
   async (req, res) => {
     try {
-      db = (await import('./db.js')).default || (await import('./db.js'));
-      const { orderId } = req.params;
+          const { orderId } = req.params;
       const { furnitureType } = req.body;
       
       // Verify order exists and user has access
@@ -529,6 +738,7 @@ app.post('/api/furniture/upload-photos/:orderId',
         success: true,
         message: `${uploadedPhotos.length} photos uploaded successfully`,
         photos: uploadedPhotos,
+        photoCount: uploadedPhotos.length,
         nextStep: 'Ready for 3D generation'
       });
       
@@ -543,22 +753,683 @@ app.post('/api/furniture/upload-photos/:orderId',
   }
 );
 
+// Add more photos to an existing order
+app.post('/api/orders/:orderId/photos', 
+  authenticateToken, 
+  validateUUID('orderId'), 
+  upload.array('photos', 5),
+  async (req, res) => {
+    try {
+      const { orderId } = req.params;
+      
+      // Verify order exists and user has access
+      const orderResult = await db.query('SELECT * FROM orders WHERE id = $1', [orderId]);
+      const order = orderResult.rows[0];
+      
+      if (!order) {
+        return res.status(404).json({ error: 'Order not found' });
+      }
+      
+      if (req.user.role.startsWith('COMPANY_') && order.company_id !== req.user.company_id) {
+        return res.status(403).json({ error: 'Access denied' });
+      }
+      
+      if (!req.files || req.files.length === 0) {
+        return res.status(400).json({ error: 'No photos provided' });
+      }
+
+      // Check total photo limit (20 photos per order)
+      const existingPhotosResult = await db.query('SELECT COUNT(*) as count FROM order_photos WHERE order_id = $1', [orderId]);
+      const existingCount = parseInt(existingPhotosResult.rows[0].count);
+      
+      if (existingCount + req.files.length > 20) {
+        return res.status(400).json({ 
+          error: `Photo limit exceeded. You can have a maximum of 20 photos per order. Currently have ${existingCount}, trying to add ${req.files.length}.` 
+        });
+      }
+      
+      // Validate and store new photos
+      const uploadedPhotos = [];
+      for (const file of req.files) {
+        const validation = await trellisService.validateImage(file.buffer);
+        if (!validation.isValid) {
+          return res.status(400).json({ 
+            error: `Invalid photo "${file.originalname}": ${validation.errors.join(', ')}` 
+          });
+        }
+        
+        const base64Data = file.buffer.toString('base64');
+        const photoResult = await db.query(`
+          INSERT INTO order_photos (order_id, filename, file_path, file_size, mime_type, uploaded_by_id)
+          VALUES ($1, $2, $3, $4, $5, $6) RETURNING *
+        `, [orderId, file.originalname, `data:${file.mimetype};base64,${base64Data}`, file.size, file.mimetype, req.user.sub]);
+        
+        uploadedPhotos.push(photoResult.rows[0]);
+      }
+      
+      logger.info('Additional photos uploaded', {
+        orderId,
+        newPhotoCount: uploadedPhotos.length,
+        totalPhotos: existingCount + uploadedPhotos.length,
+        user: req.user.email
+      });
+      
+      res.json({
+        success: true,
+        message: `${uploadedPhotos.length} photos added successfully`,
+        photos: uploadedPhotos,
+        totalPhotos: existingCount + uploadedPhotos.length
+      });
+      
+    } catch (error) {
+      logger.error('Additional photo upload failed', { 
+        error: error.message, 
+        orderId: req.params.orderId,
+        user: req.user?.email 
+      });
+      res.status(500).json({ error: 'Photo upload failed' });
+    }
+  }
+);
+
+// Model proxy endpoint to bypass CORS restrictions
+app.get('/api/models/proxy', async (req, res) => {
+  try {
+    const { url } = req.query;
+    
+    if (!url) {
+      return res.status(400).json({ error: 'URL parameter is required' });
+    }
+
+    // Validate the URL is from an allowed domain
+    const allowedDomains = [
+      'viverse-backend.onrender.com',
+      'huggingface.co',
+      'hf.co'
+    ];
+    
+    const urlObj = new URL(url);
+    if (!allowedDomains.includes(urlObj.hostname)) {
+      return res.status(403).json({ error: 'Domain not allowed' });
+    }
+
+    // Only allow GLB and GLTF files
+    if (!/\.(glb|gltf)$/i.test(urlObj.pathname)) {
+      return res.status(400).json({ error: 'Only GLB and GLTF models are supported' });
+    }
+
+    logger.info('Proxying model request', { 
+      originalUrl: url,
+      domain: urlObj.hostname 
+    });
+
+    // Fetch the model from the external service
+    const response = await fetch(url);
+    
+    if (!response.ok) {
+      logger.error('Failed to fetch external model', { 
+        url, 
+        status: response.status, 
+        statusText: response.statusText 
+      });
+      return res.status(response.status).json({ 
+        error: `Failed to fetch model: ${response.statusText}` 
+      });
+    }
+
+    // Set appropriate headers for 3D model serving
+    res.set({
+      'Content-Type': 'model/gltf-binary',
+      'Access-Control-Allow-Origin': '*',
+      'Access-Control-Allow-Methods': 'GET',
+      'Access-Control-Allow-Headers': 'Content-Type',
+      'Cache-Control': 'public, max-age=3600' // Cache for 1 hour
+    });
+
+    // Stream the model data to the client
+    response.body.pipe(res);
+
+  } catch (error) {
+    logger.error('Model proxy error', { 
+      error: error.message, 
+      url: req.query.url 
+    });
+    res.status(500).json({ error: 'Failed to proxy model' });
+  }
+});
+
+// Delete a specific photo
+app.delete('/api/photos/:photoId', authenticateToken, validateUUID('photoId'), async (req, res) => {
+  try {
+    const { photoId } = req.params;
+    
+    // Get photo details and verify access
+    const photoResult = await db.query(`
+      SELECT op.*, o.company_id 
+      FROM order_photos op 
+      JOIN orders o ON op.order_id = o.id 
+      WHERE op.id = $1
+    `, [photoId]);
+    
+    const photo = photoResult.rows[0];
+    if (!photo) {
+      return res.status(404).json({ error: 'Photo not found' });
+    }
+    
+    // Check permissions
+    if (req.user.role.startsWith('COMPANY_') && photo.company_id !== req.user.company_id) {
+      return res.status(403).json({ error: 'Access denied' });
+    }
+    
+    // Delete the photo
+    await db.query('DELETE FROM order_photos WHERE id = $1', [photoId]);
+    
+    logger.info('Photo deleted', {
+      photoId,
+      orderId: photo.order_id,
+      filename: photo.filename,
+      user: req.user.email
+    });
+    
+    res.json({ success: true, message: 'Photo deleted successfully' });
+    
+  } catch (error) {
+    logger.error('Photo deletion failed', { 
+      error: error.message, 
+      photoId: req.params.photoId,
+      user: req.user?.email 
+    });
+    res.status(500).json({ error: 'Photo deletion failed' });
+  }
+});
+
+// Photo Set Management Endpoints
+
+// Get all photo sets for an order
+app.get('/api/orders/:orderId/photo-sets', authenticateToken, validateUUID('orderId'), async (req, res) => {
+  try {
+    const { orderId } = req.params;
+    
+    // Verify order access
+    const orderResult = await db.query('SELECT * FROM orders WHERE id = $1', [orderId]);
+    const order = orderResult.rows[0];
+    
+    if (!order) {
+      return res.status(404).json({ error: 'Order not found' });
+    }
+    
+    if (req.user.role === 'CLIENT' && order.assigned_client_id !== req.user.sub) {
+      return res.status(403).json({ error: 'Access denied' });
+    } else if (req.user.role.startsWith('COMPANY_') && order.company_id !== req.user.company_id) {
+      return res.status(403).json({ error: 'Access denied' });
+    }
+    
+    // Get photo sets with photo counts
+    const photoSetsResult = await db.query(`
+      SELECT 
+        ps.*,
+        COUNT(op.id) as photo_count,
+        ARRAY_AGG(op.id ORDER BY op.created_at) FILTER (WHERE op.id IS NOT NULL) as photo_ids
+      FROM photo_sets ps
+      LEFT JOIN order_photos op ON ps.id = op.photo_set_id
+      WHERE ps.order_id = $1
+      GROUP BY ps.id
+      ORDER BY ps.created_at DESC
+    `, [orderId]);
+    
+    res.json(photoSetsResult.rows);
+  } catch (error) {
+    logger.error('Error getting photo sets', { error: error.message, orderId: req.params.orderId });
+    res.status(500).json({ error: 'Failed to get photo sets' });
+  }
+});
+
+// Create new photo set with selected photos
+app.post('/api/orders/:orderId/photo-sets', authenticateToken, validateUUID('orderId'), async (req, res) => {
+  try {
+    const { orderId } = req.params;
+    const { name, photoIds } = req.body;
+    
+    // Verify order access
+    const orderResult = await db.query('SELECT * FROM orders WHERE id = $1', [orderId]);
+    const order = orderResult.rows[0];
+    
+    if (!order) {
+      return res.status(404).json({ error: 'Order not found' });
+    }
+    
+    if (req.user.role.startsWith('COMPANY_') && order.company_id !== req.user.company_id) {
+      return res.status(403).json({ error: 'Access denied' });
+    }
+    
+    // Create photo set
+    const photoSetResult = await db.query(`
+      INSERT INTO photo_sets (order_id, name, photo_count)
+      VALUES ($1, $2, $3) RETURNING *
+    `, [orderId, name, photoIds.length]);
+    
+    const photoSet = photoSetResult.rows[0];
+    
+    // Update photos to belong to this set
+    if (photoIds && photoIds.length > 0) {
+      await db.query(`
+        UPDATE order_photos 
+        SET photo_set_id = $1 
+        WHERE id = ANY($2) AND order_id = $3
+      `, [photoSet.id, photoIds, orderId]);
+    }
+    
+    logger.info('Photo set created', {
+      photoSetId: photoSet.id,
+      orderId,
+      photoCount: photoIds.length,
+      user: req.user.email
+    });
+    
+    res.status(201).json(photoSet);
+  } catch (error) {
+    logger.error('Error creating photo set', { error: error.message, orderId: req.params.orderId });
+    res.status(500).json({ error: 'Failed to create photo set' });
+  }
+});
+
+// Update photos in a photo set
+app.put('/api/photo-sets/:photoSetId/photos', authenticateToken, validateUUID('photoSetId'), async (req, res) => {
+  try {
+    const { photoSetId } = req.params;
+    const { photoIds } = req.body;
+    
+    // Get photo set and verify access
+    const photoSetResult = await db.query(`
+      SELECT ps.*, o.company_id, o.assigned_client_id 
+      FROM photo_sets ps 
+      JOIN orders o ON ps.order_id = o.id 
+      WHERE ps.id = $1
+    `, [photoSetId]);
+    
+    const photoSet = photoSetResult.rows[0];
+    if (!photoSet) {
+      return res.status(404).json({ error: 'Photo set not found' });
+    }
+    
+    if (req.user.role === 'CLIENT' && photoSet.assigned_client_id !== req.user.sub) {
+      return res.status(403).json({ error: 'Access denied' });
+    } else if (req.user.role.startsWith('COMPANY_') && photoSet.company_id !== req.user.company_id) {
+      return res.status(403).json({ error: 'Access denied' });
+    }
+    
+    // Clear existing photo set assignments for this set
+    await db.query('UPDATE order_photos SET photo_set_id = NULL WHERE photo_set_id = $1', [photoSetId]);
+    
+    // Assign new photos to the set
+    if (photoIds && photoIds.length > 0) {
+      await db.query(`
+        UPDATE order_photos 
+        SET photo_set_id = $1 
+        WHERE id = ANY($2) AND order_id = $3
+      `, [photoSetId, photoIds, photoSet.order_id]);
+    }
+    
+    // Update photo count
+    await db.query('UPDATE photo_sets SET photo_count = $1 WHERE id = $2', [photoIds.length, photoSetId]);
+    
+    logger.info('Photo set updated', {
+      photoSetId,
+      photoCount: photoIds.length,
+      user: req.user.email
+    });
+    
+    res.json({ success: true, message: 'Photo set updated successfully' });
+  } catch (error) {
+    logger.error('Error updating photo set', { error: error.message, photoSetId: req.params.photoSetId });
+    res.status(500).json({ error: 'Failed to update photo set' });
+  }
+});
+
+// Get photos used for a specific generation attempt
+app.get('/api/generation-attempts/:attemptId/photos', authenticateToken, validateUUID('attemptId'), async (req, res) => {
+  try {
+    const { attemptId } = req.params;
+    
+    // Get generation attempt and verify access
+    const attemptResult = await db.query(`
+      SELECT ga.*, o.company_id, o.assigned_client_id 
+      FROM generation_attempts ga 
+      JOIN orders o ON ga.order_id = o.id 
+      WHERE ga.id = $1
+    `, [attemptId]);
+    
+    const attempt = attemptResult.rows[0];
+    if (!attempt) {
+      return res.status(404).json({ error: 'Generation attempt not found' });
+    }
+    
+    if (req.user.role === 'CLIENT' && attempt.assigned_client_id !== req.user.sub) {
+      return res.status(403).json({ error: 'Access denied' });
+    } else if (req.user.role.startsWith('COMPANY_') && attempt.company_id !== req.user.company_id) {
+      return res.status(403).json({ error: 'Access denied' });
+    }
+    
+    // Get photos from the photo set used for this attempt (if any)
+    let photos = [];
+    if (attempt.photo_set_id) {
+      const photosResult = await db.query(`
+        SELECT op.* FROM order_photos op 
+        WHERE op.photo_set_id = $1 
+        ORDER BY op.created_at
+      `, [attempt.photo_set_id]);
+      photos = photosResult.rows;
+    } else {
+      // Fallback: get all photos for the order at the time of generation
+      const photosResult = await db.query(`
+        SELECT op.* FROM order_photos op 
+        WHERE op.order_id = $1 AND op.created_at <= $2
+        ORDER BY op.created_at
+      `, [attempt.order_id, attempt.created_at]);
+      photos = photosResult.rows;
+    }
+    
+    res.json(photos);
+  } catch (error) {
+    logger.error('Error getting generation attempt photos', { error: error.message, attemptId: req.params.attemptId });
+    res.status(500).json({ error: 'Failed to get photos' });
+  }
+});
+
+// Bulk delete selected photos
+app.delete('/api/orders/:orderId/photos', authenticateToken, validateUUID('orderId'), async (req, res) => {
+  try {
+    const { orderId } = req.params;
+    const { photoIds } = req.body;
+    
+    if (!photoIds || photoIds.length === 0) {
+      return res.status(400).json({ error: 'No photos selected for deletion' });
+    }
+    
+    // Verify order access
+    const orderResult = await db.query('SELECT * FROM orders WHERE id = $1', [orderId]);
+    const order = orderResult.rows[0];
+    
+    if (!order) {
+      return res.status(404).json({ error: 'Order not found' });
+    }
+    
+    if (req.user.role === 'CLIENT' && order.assigned_client_id !== req.user.sub) {
+      return res.status(403).json({ error: 'Access denied' });
+    } else if (req.user.role.startsWith('COMPANY_') && order.company_id !== req.user.company_id) {
+      return res.status(403).json({ error: 'Access denied' });
+    }
+    
+    // Verify photos belong to this order
+    const photosResult = await db.query(`
+      SELECT id, filename FROM order_photos 
+      WHERE id = ANY($1) AND order_id = $2
+    `, [photoIds, orderId]);
+    
+    if (photosResult.rows.length !== photoIds.length) {
+      return res.status(400).json({ error: 'Some selected photos do not belong to this order' });
+    }
+    
+    // Delete the photos
+    await db.query('DELETE FROM order_photos WHERE id = ANY($1) AND order_id = $2', [photoIds, orderId]);
+    
+    const deletedFilenames = photosResult.rows.map(p => p.filename);
+    
+    logger.info('Bulk photo deletion completed', {
+      orderId,
+      deletedCount: photoIds.length,
+      deletedFiles: deletedFilenames,
+      user: req.user.email
+    });
+    
+    res.json({ 
+      success: true, 
+      message: `${photoIds.length} photos deleted successfully`,
+      deletedCount: photoIds.length
+    });
+    
+  } catch (error) {
+    logger.error('Bulk photo deletion failed', { 
+      error: error.message, 
+      orderId: req.params.orderId,
+      user: req.user?.email 
+    });
+    res.status(500).json({ error: 'Bulk photo deletion failed' });
+  }
+});
+
+// Regenerate 3D model with selected photos
+app.post('/api/orders/:orderId/regenerate', authenticateToken, validateUUID('orderId'), async (req, res) => {
+  try {
+    const { orderId } = req.params;
+    const { photoIds, photoSetName } = req.body;
+    
+    if (!photoIds || photoIds.length === 0) {
+      return res.status(400).json({ error: 'At least one photo must be selected' });
+    }
+    
+    // Verify order access
+    const orderResult = await db.query('SELECT * FROM orders WHERE id = $1', [orderId]);
+    const order = orderResult.rows[0];
+    
+    if (!order) {
+      return res.status(404).json({ error: 'Order not found' });
+    }
+    
+    if (req.user.role.startsWith('COMPANY_') && order.company_id !== req.user.company_id) {
+      return res.status(403).json({ error: 'Access denied' });
+    }
+    
+    // Verify selected photos belong to this order
+    const photosResult = await db.query(`
+      SELECT * FROM order_photos 
+      WHERE id = ANY($1) AND order_id = $2
+    `, [photoIds, orderId]);
+    
+    if (photosResult.rows.length !== photoIds.length) {
+      return res.status(400).json({ error: 'Some selected photos do not belong to this order' });
+    }
+    
+    // Create new photo set
+    const setName = photoSetName || `Regeneration Set ${new Date().toLocaleString()}`;
+    const photoSetResult = await db.query(`
+      INSERT INTO photo_sets (order_id, name, photo_count)
+      VALUES ($1, $2, $3) RETURNING *
+    `, [orderId, setName, photoIds.length]);
+    
+    const photoSet = photoSetResult.rows[0];
+    
+    // Assign selected photos to the new set
+    await db.query(`
+      UPDATE order_photos 
+      SET photo_set_id = $1 
+      WHERE id = ANY($2) AND order_id = $3
+    `, [photoSet.id, photoIds, orderId]);
+    
+    // Check version limits and manage if needed
+    const versionManagement = req.versionManagement || 
+      await versionService.checkAndManageVersions(orderId);
+    
+    // Update order generation status
+    await db.query(`
+      UPDATE orders SET 
+        generation_status = 'generating', 
+        generation_attempts = generation_attempts + 1
+      WHERE id = $1
+    `, [orderId]);
+    
+    // Create new generation attempt
+    const attemptNumber = order.generation_attempts + 1;
+    const seedValue = Math.floor(Math.random() * 1000000);
+    
+    const attemptResult = await db.query(`
+      INSERT INTO generation_attempts (order_id, attempt_number, seed_value, status, photo_set_id)
+      VALUES ($1, $2, $3, 'pending', $4) RETURNING *
+    `, [orderId, attemptNumber, seedValue, photoSet.id]);
+    
+    const generationAttempt = attemptResult.rows[0];
+    
+    // Start 3D generation in background
+    process.nextTick(async () => {
+      try {
+        // Get photo data for generation
+        const photosData = photosResult.rows;
+        
+        // Convert base64 photos to buffers for TRELLIS
+        const photoBuffers = photosData.map(photo => {
+          const base64Data = photo.file_path.replace(/^data:image\/[a-z]+;base64,/, '');
+          return Buffer.from(base64Data, 'base64');
+        });
+        
+        logger.info('Starting TRELLIS 3D generation with photo set', {
+          orderId,
+          photoSetId: photoSet.id,
+          attemptId: generationAttempt.id,
+          photoCount: photoBuffers.length
+        });
+        
+        // Initialize TRELLIS service
+        const trellisService = new TRELLISService();
+        
+        // Process with TRELLIS
+        const result = await trellisService.processImages(photoBuffers, {
+          orderId,
+          attemptNumber,
+          seedValue
+        });
+        
+        if (result.success) {
+          // Update generation attempt with success
+          await db.query(`
+            UPDATE generation_attempts SET 
+              status = 'completed',
+              glb_url = $1,
+              model_quality_score = $2,
+              processing_time_seconds = $3,
+              selected = true
+            WHERE id = $4
+          `, [result.glbUrl, result.modelQualityScore, result.processingTimeSeconds, generationAttempt.id]);
+          
+          // Update order with new model URL
+          await db.query('UPDATE orders SET model_url = $1, generation_status = $2 WHERE id = $3', 
+            [result.glbUrl, 'completed', orderId]);
+          
+          // Deselect other attempts
+          await db.query('UPDATE generation_attempts SET selected = false WHERE order_id = $1 AND id != $2', 
+            [orderId, generationAttempt.id]);
+          
+          logger.info('TRELLIS generation completed successfully', {
+            orderId,
+            attemptId: generationAttempt.id,
+            modelUrl: result.glbUrl,
+            qualityScore: result.modelQualityScore
+          });
+        } else {
+          // Update generation attempt with failure
+          await db.query(`
+            UPDATE generation_attempts SET 
+              status = 'failed',
+              error_message = $1,
+              processing_time_seconds = $2
+            WHERE id = $3
+          `, [result.error, result.processingTimeSeconds, generationAttempt.id]);
+          
+          await db.query('UPDATE orders SET generation_status = $1 WHERE id = $2', 
+            ['failed', orderId]);
+          
+          logger.error('TRELLIS generation failed', {
+            orderId,
+            attemptId: generationAttempt.id,
+            error: result.error
+          });
+        }
+      } catch (error) {
+        logger.error('Error in background generation process', {
+          orderId,
+          attemptId: generationAttempt.id,
+          error: error.message
+        });
+        
+        await db.query(`
+          UPDATE generation_attempts SET 
+            status = 'failed',
+            error_message = $1
+          WHERE id = $2
+        `, [error.message, generationAttempt.id]);
+        
+        await db.query('UPDATE orders SET generation_status = $1 WHERE id = $2', 
+          ['failed', orderId]);
+      }
+    });
+    
+    logger.info('Regeneration request initiated', {
+      orderId,
+      photoSetId: photoSet.id,
+      attemptId: generationAttempt.id,
+      photoCount: photoIds.length,
+      user: req.user.email
+    });
+    
+    res.status(201).json({
+      success: true,
+      message: 'Regeneration started successfully',
+      photoSet,
+      generationAttempt,
+      versionManagement
+    });
+    
+  } catch (error) {
+    logger.error('Error starting regeneration', { error: error.message, orderId: req.params.orderId });
+    res.status(500).json({ error: 'Failed to start regeneration' });
+  }
+});
+
+// GPU quota status endpoint
+app.get('/api/gpu/quota', authenticateToken, async (req, res) => {
+  try {
+    if (!gpuQuotaService) {
+      return res.status(503).json({ error: 'GPU quota service not available' });
+    }
+
+    const quota = await gpuQuotaService.getCurrentQuota();
+    res.json(quota);
+  } catch (error) {
+    logger.error('Error getting GPU quota', { error: error.message });
+    res.status(500).json({ error: 'Failed to get quota information' });
+  }
+});
+
 // Generate 3D model from uploaded photos
 app.post('/api/furniture/generate-3d', 
   authenticateToken, 
   validate(schemas.generate3D),
+  checkVersionLimits,
   async (req, res) => {
     try {
-      db = (await import('./db.js')).default || (await import('./db.js'));
-      const { orderId, attempts = 1, guidanceStrength, samplingSteps, seed } = req.body;
+          const { orderId, attempts = 1, guidanceStrength, samplingSteps, seed, photoIds = [] } = req.body;
       
-      // Check GPU availability
-      const gpuStatus = await trellisService.checkGPUAvailability();
-      if (!gpuStatus.canProcess) {
-        return res.status(429).json({
-          error: 'Daily GPU limit reached',
-          details: gpuStatus,
-          retryAfter: '24 hours'
+      // Check GPU quota and reserve slot
+      if (!gpuQuotaService) {
+        return res.status(503).json({ error: 'GPU quota service not available' });
+      }
+
+      const reservationResult = await gpuQuotaService.reserveGeneration(orderId, photoIds, {
+        seed,
+        guidanceStrength, 
+        samplingSteps,
+        attempts
+      });
+
+      if (reservationResult.type === 'queued') {
+        // Return queued response immediately
+        return res.json({
+          success: true,
+          type: 'queued',
+          message: reservationResult.message,
+          queuePosition: reservationResult.queuePosition,
+          scheduledDate: reservationResult.scheduledDate,
+          estimatedTime: reservationResult.estimatedTime,
+          orderId
         });
       }
       
@@ -635,9 +1506,9 @@ app.post('/api/furniture/generate-3d',
               attemptId
             ]);
             
-            // Record GPU usage
+            // Record GPU usage via quota service
             if (result.processingTimeSeconds) {
-              await trellisService.recordGPUUsage(result.processingTimeSeconds);
+              await gpuQuotaService.recordGenerationStart(orderId);
             }
             
             if (result.success && attempt === 1) {
@@ -689,15 +1560,23 @@ app.post('/api/furniture/generate-3d',
         logger.error('Background generation failed', { orderId, error: error.message });
       });
       
-      // Return immediate response
-      res.json({
+      // Return immediate response with version management info
+      const response = {
         success: true,
+        type: 'immediate',
         message: '3D generation started',
         orderId,
         estimatedTime: 48 * attempts,
         attempts,
         status: 'processing'
-      });
+      };
+
+      // Include version management info if available
+      if (req.versionManagement) {
+        response.versionManagement = req.versionManagement;
+      }
+
+      res.json(response);
       
     } catch (error) {
       logger.error('3D generation request failed', { 
@@ -710,13 +1589,52 @@ app.post('/api/furniture/generate-3d',
   }
 );
 
+// Get photos for an order
+app.get('/api/furniture/photos/:orderId', 
+  authenticateToken, 
+  validateUUID('orderId'), 
+  async (req, res) => {
+    try {
+          const { orderId } = req.params;
+      
+      // Verify order exists and user has access
+      const orderResult = await db.query('SELECT * FROM orders WHERE id = $1', [orderId]);
+      const order = orderResult.rows[0];
+      
+      if (!order) {
+        return res.status(404).json({ error: 'Order not found' });
+      }
+      
+      if (req.user.role.startsWith('COMPANY_') && order.company_id !== req.user.company_id) {
+        return res.status(403).json({ error: 'Access denied' });
+      }
+      
+      const photosResult = await db.query(`
+        SELECT id, filename, file_path, file_size, mime_type, created_at
+        FROM order_photos 
+        WHERE order_id = $1 
+        ORDER BY created_at DESC
+      `, [orderId]);
+      
+      res.json(photosResult.rows);
+      
+    } catch (error) {
+      logger.error('Failed to get photos', {
+        error: error.message,
+        orderId: req.params.orderId,
+        user: req.user?.email
+      });
+      res.status(500).json({ error: 'Failed to get photos' });
+    }
+  }
+);
+
 // Get measurement template for furniture type
 app.get('/api/furniture/measurement-template/:type', 
   authenticateToken,
   async (req, res) => {
     try {
-      db = (await import('./db.js')).default || (await import('./db.js'));
-      const { type } = req.params;
+          const { type } = req.params;
       
       const result = await db.query(`
         SELECT * FROM measurement_templates 
@@ -745,8 +1663,7 @@ app.post('/api/generation/select-best',
   validate(schemas.selectBestAttempt),
   async (req, res) => {
     try {
-      db = (await import('./db.js')).default || (await import('./db.js'));
-      const { orderId, selectedAttemptId } = req.body;
+          const { orderId, selectedAttemptId } = req.body;
       
       // Verify access to order
       const orderResult = await db.query('SELECT * FROM orders WHERE id = $1', [orderId]);

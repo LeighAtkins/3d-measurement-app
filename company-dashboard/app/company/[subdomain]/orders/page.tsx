@@ -4,6 +4,7 @@ import { useState, useEffect } from 'react'
 import { useParams } from 'next/navigation'
 import Link from 'next/link'
 import { ApiClient } from '@3d-measurement-app/api-client'
+import PhotoUploader from '../../../../components/PhotoUploader'
 
 interface Order {
   id: string
@@ -12,7 +13,7 @@ interface Order {
   createdAt: string
   updatedAt: string
   description?: string
-  modelUrl?: string
+  model_url?: string
   assignedClient?: {
     id: string
     email: string
@@ -44,6 +45,14 @@ export default function CompanyOrdersPage() {
     usePhotos: false
   })
   const [selectedPhotos, setSelectedPhotos] = useState<File[]>([])
+  
+  const furnitureTypes = [
+    { value: 'sofa', label: 'Sofa' },
+    { value: 'armchair', label: 'Armchair' },
+    { value: 'cushion', label: 'Cushion' },
+    { value: 'ottoman', label: 'Ottoman' },
+    { value: 'coffee-table', label: 'Coffee Table' }
+  ]
 
   useEffect(() => {
     loadOrders()
@@ -66,13 +75,81 @@ export default function CompanyOrdersPage() {
     
     try {
       const apiClient = new ApiClient()
-      await apiClient.createOrder({
+      
+      // Create the order first
+      const orderData = {
         ...newOrder,
-        status: 'PENDING'
-      })
+        status: 'PENDING',
+        furniture_type: newOrder.furnitureType,
+        generation_status: newOrder.usePhotos ? 'pending' : 'not_applicable'
+      }
+      
+      const createdOrder = await apiClient.createOrder(orderData)
+      
+      // If using photos, upload them
+      if (newOrder.usePhotos && selectedPhotos.length > 0) {
+        console.log('Starting photo upload for order:', createdOrder.id)
+        console.log('Furniture type:', newOrder.furnitureType)
+        console.log('Selected photos:', selectedPhotos.length)
+        
+        const formData = new FormData()
+        
+        // Add furnitureType field that API expects
+        formData.append('furnitureType', newOrder.furnitureType)
+        
+        // Add photos
+        selectedPhotos.forEach((photo, index) => {
+          console.log(`Adding photo ${index + 1}:`, photo.name, photo.type, photo.size)
+          formData.append('photos', photo)
+        })
+        
+        // Debug FormData contents
+        for (let pair of formData.entries()) {
+          console.log('FormData entry:', pair[0], typeof pair[1] === 'object' ? 'File object' : pair[1])
+        }
+        
+        try {
+          console.log('Sending request to:', `http://localhost:8000/api/furniture/upload-photos/${createdOrder.id}`)
+          console.log('Auth token:', apiClient.getToken() ? 'Present' : 'Missing')
+          
+          const response = await fetch(`http://localhost:8000/api/furniture/upload-photos/${createdOrder.id}`, {
+            method: 'POST',
+            headers: {
+              'Authorization': `Bearer ${apiClient.getToken()}`
+            },
+            body: formData
+          })
+          
+          console.log('Upload response status:', response.status)
+          
+          if (!response.ok) {
+            const errorData = await response.json().catch(() => ({ error: 'Unknown error' }))
+            console.error('Photo upload failed:', response.status, errorData)
+            
+            let errorMessage = errorData.error || 'Unknown error'
+            if (errorMessage.includes('Invalid or corrupted image file')) {
+              errorMessage = 'Photo format not supported. Please use JPEG, PNG, or WebP files only.'
+            } else if (errorMessage.includes('Unsupported image format')) {
+              errorMessage = 'Photo format not supported. Please use JPEG (.jpg), PNG (.png), or WebP (.webp) files only.'
+            } else if (errorMessage.includes('Image too small')) {
+              errorMessage = 'Photo is too small. Please use images that are at least 512x512 pixels for best 3D generation quality.'
+            }
+            
+            alert(`Photo upload failed: ${errorMessage}\n\nOrder was created successfully, but photos need to be uploaded separately.\n\nSupported formats: JPEG, PNG, WebP`)
+          } else {
+            const result = await response.json()
+            console.log('Photos uploaded successfully:', result)
+            alert('Order and photos uploaded successfully!')
+          }
+        } catch (photoErr) {
+          console.error('Photo upload network error:', photoErr)
+          alert('Photo upload failed due to network error. Order was created but photos need to be uploaded separately.')
+        }
+      }
       
       setShowCreateForm(false)
-      setNewOrder({ title: '', description: '', modelUrl: '/sample-models/cube.glb' })
+      setNewOrder({ title: '', description: '', modelUrl: '/sample-models/cube.glb', furnitureType: '', usePhotos: false })
+      setSelectedPhotos([])
       loadOrders() // Refresh the list
     } catch (err: any) {
       alert(`Failed to create order: ${err.message}`)
@@ -145,18 +222,77 @@ export default function CompanyOrdersPage() {
                 />
               </div>
               
+              {/* Furniture Type Selection */}
               <div>
-                <label className="block text-sm font-medium text-gray-700">3D Model</label>
+                <label className="block text-sm font-medium text-gray-700">Furniture Type</label>
                 <select
-                  value={newOrder.modelUrl}
-                  onChange={(e) => setNewOrder(prev => ({ ...prev, modelUrl: e.target.value }))}
+                  value={newOrder.furnitureType}
+                  onChange={(e) => setNewOrder(prev => ({ ...prev, furnitureType: e.target.value }))}
                   className="mt-1 block w-full border-gray-300 rounded-md shadow-sm focus:ring-blue-500 focus:border-blue-500 text-gray-900 bg-white"
+                  required
                 >
-                  <option value="/sample-models/cube.glb">Cube (Demo)</option>
-                  <option value="/sample-models/room.glb">Room (Demo)</option>
-                  <option value="/sample-models/cabinet.glb">Cabinet (Demo)</option>
+                  <option value="">Select furniture type</option>
+                  {furnitureTypes.map(type => (
+                    <option key={type.value} value={type.value}>{type.label}</option>
+                  ))}
                 </select>
               </div>
+
+              {/* Photo vs 3D Model Toggle */}
+              <div>
+                <div className="flex items-center space-x-3">
+                  <input
+                    type="checkbox"
+                    id="usePhotos"
+                    checked={newOrder.usePhotos}
+                    onChange={(e) => setNewOrder(prev => ({ ...prev, usePhotos: e.target.checked }))}
+                    className="h-4 w-4 text-blue-600 focus:ring-blue-500 border-gray-300 rounded"
+                  />
+                  <label htmlFor="usePhotos" className="text-sm font-medium text-gray-700">
+                    Generate 3D model from photos (TRELLIS)
+                  </label>
+                </div>
+                <p className="mt-1 text-xs text-gray-500">
+                  Upload photos to automatically generate a 3D model, or use a pre-made model below
+                </p>
+              </div>
+
+              {/* Photo Upload Section */}
+              {newOrder.usePhotos && (
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-2">
+                    Upload Photos ({selectedPhotos.length}/5)
+                  </label>
+                  <PhotoUploader
+                    onPhotosSelected={setSelectedPhotos}
+                    furnitureType={newOrder.furnitureType}
+                    maxFiles={5}
+                  />
+                  {selectedPhotos.length > 0 && (
+                    <div className="mt-2">
+                      <p className="text-xs text-gray-600">
+                        Selected: {selectedPhotos.map(f => f.name).join(', ')}
+                      </p>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* 3D Model Selection (only if not using photos) */}
+              {!newOrder.usePhotos && (
+                <div>
+                  <label className="block text-sm font-medium text-gray-700">Pre-made 3D Model</label>
+                  <select
+                    value={newOrder.modelUrl}
+                    onChange={(e) => setNewOrder(prev => ({ ...prev, modelUrl: e.target.value }))}
+                    className="mt-1 block w-full border-gray-300 rounded-md shadow-sm focus:ring-blue-500 focus:border-blue-500 text-gray-900 bg-white"
+                  >
+                    <option value="/sample-models/cube.glb">Cube (Demo)</option>
+                    <option value="/sample-models/room.glb">Room (Demo)</option>
+                    <option value="/sample-models/cabinet.glb">Cabinet (Demo)</option>
+                  </select>
+                </div>
+              )}
               
               <div className="flex justify-end space-x-3 pt-4">
                 <button
@@ -241,8 +377,8 @@ export default function CompanyOrdersPage() {
                   
                   <div className="flex justify-between">
                     <span>3D Model:</span>
-                    <span className={order.modelUrl ? 'text-green-600' : 'text-gray-400'}>
-                      {order.modelUrl ? '✓ Available' : 'Not set'}
+                    <span className={order.model_url ? 'text-green-600' : 'text-gray-400'}>
+                      {order.model_url ? '✓ Available' : 'Not set'}
                     </span>
                   </div>
                   

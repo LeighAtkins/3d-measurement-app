@@ -21,6 +21,10 @@ export class ApiClient {
     }
   }
 
+  getToken(): string | null {
+    return this.token
+  }
+
   private async makeRequest(url: string, options: RequestInit = {}) {
     const headers = new Headers(options.headers)
     
@@ -30,12 +34,27 @@ export class ApiClient {
     
     headers.set('Content-Type', 'application/json')
 
+    console.log('ApiClient making request:', {
+      url: `${this.baseUrl}${url}`,
+      method: options.method || 'GET',
+      hasToken: !!this.token,
+      body: options.body ? 'Present' : 'None'
+    })
+
     const response = await fetch(`${this.baseUrl}${url}`, {
       ...options,
       headers,
     })
 
+    console.log('ApiClient response:', {
+      status: response.status,
+      statusText: response.statusText,
+      ok: response.ok
+    })
+
     if (!response.ok) {
+      const errorText = await response.text().catch(() => 'Unknown error')
+      console.error('ApiClient error details:', errorText)
       throw new Error(`HTTP ${response.status}: ${response.statusText}`)
     }
 
@@ -121,6 +140,79 @@ export class ApiClient {
     return this.request(`/api/orders/${orderId}/measurements/${measurementId}`, {
       method: 'DELETE',
     })
+  }
+
+  // Photos
+  async getOrderPhotos(orderId: string) {
+    return this.request(`/api/furniture/photos/${orderId}`)
+  }
+
+  async addPhotosToOrder(orderId: string, files: File[]) {
+    const formData = new FormData()
+    files.forEach(file => {
+      formData.append('photos', file)
+    })
+
+    return fetch(`${this.baseUrl}/api/orders/${orderId}/photos`, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${this.token}`,
+      },
+      body: formData,
+    }).then(response => {
+      if (!response.ok) {
+        throw new Error(`HTTP error! status: ${response.status}`)
+      }
+      return response.json()
+    })
+  }
+
+  async deletePhoto(photoId: string) {
+    return this.request(`/api/photos/${photoId}`, {
+      method: 'DELETE',
+    })
+  }
+
+  async bulkDeletePhotos(orderId: string, photoIds: string[]) {
+    return this.request(`/api/orders/${orderId}/photos`, {
+      method: 'DELETE',
+      body: JSON.stringify({ photoIds }),
+    })
+  }
+
+  async regenerateWithPhotos(orderId: string, photoIds: string[], photoSetName?: string) {
+    return this.request(`/api/orders/${orderId}/regenerate`, {
+      method: 'POST',
+      body: JSON.stringify({ photoIds, photoSetName }),
+    })
+  }
+
+  // Photo Set Management
+  async getPhotoSets(orderId: string) {
+    return this.request(`/api/orders/${orderId}/photo-sets`)
+  }
+
+  async createPhotoSet(orderId: string, name: string, photoIds: string[]) {
+    return this.request(`/api/orders/${orderId}/photo-sets`, {
+      method: 'POST',
+      body: JSON.stringify({ name, photoIds }),
+    })
+  }
+
+  async updatePhotoSet(photoSetId: string, photoIds: string[]) {
+    return this.request(`/api/photo-sets/${photoSetId}/photos`, {
+      method: 'PUT',
+      body: JSON.stringify({ photoIds }),
+    })
+  }
+
+  async getGenerationAttemptPhotos(attemptId: string) {
+    return this.request(`/api/generation-attempts/${attemptId}/photos`)
+  }
+
+  // GPU Quota
+  async getGPUQuota() {
+    return this.request('/api/gpu/quota')
   }
 }
 

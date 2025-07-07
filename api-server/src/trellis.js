@@ -1,4 +1,4 @@
-import { Client } from '@gradio/client';
+import { Client, handle_file } from '@gradio/client';
 import sharp from 'sharp';
 import logger from './logger.js';
 
@@ -45,6 +45,7 @@ export class TRELLISService {
    */
   async processImage(imageBuffer, options = {}) {
     const startTime = Date.now();
+    let imageFile = null;
     
     try {
       // Step 1: Validate image
@@ -56,66 +57,32 @@ export class TRELLISService {
       // Step 2: Initialize client
       const client = await this.initClient();
 
-      // Step 3: Start session
-      logger.info('Starting TRELLIS session');
-      await client.predict("/start_session", {});
-
-      // Step 4: Prepare image for upload
-      const imageFile = await this.createImageFile(imageBuffer);
-
-      // Step 5: Preprocess images (background removal happens here)
-      logger.info('Preprocessing images', { imageSize: imageBuffer.length });
-      const preprocessResult = await client.predict("/preprocess_images", {
-        images: [imageFile]
-      });
-
-      // Step 6: Get seed
-      const seed = options.seed || 0;
-      const randomizeSeed = !options.seed;
-      const seedResult = await client.predict("/get_seed", {
-        randomize_seed: randomizeSeed,
-        seed: seed
-      });
-
-      const finalSeed = seedResult.data[0];
-      logger.info('Generated seed', { finalSeed, randomized: randomizeSeed });
-
-      // Step 7: Generate 3D model
-      logger.info('Starting 3D generation via TRELLIS', { 
-        seed: finalSeed,
-        ssGuidanceStrength: options.ss_guidance_strength || 7.5,
-        ssSamplingSteps: options.ss_sampling_steps || 12,
-        slatGuidanceStrength: options.slat_guidance_strength || 3,
-        slatSamplingSteps: options.slat_sampling_steps || 12
-      });
-
-      const generationResult = await client.predict("/image_to_3d", {
-        multiimages: preprocessResult.data[0], // Use preprocessed images
-        seed: finalSeed,
-        ss_guidance_strength: options.ss_guidance_strength || 7.5,
-        ss_sampling_steps: options.ss_sampling_steps || 12,
-        slat_guidance_strength: options.slat_guidance_strength || 3,
-        slat_sampling_steps: options.slat_sampling_steps || 12,
-        multiimage_algo: options.multiimage_algo || "stochastic"
-      });
-
-      // Step 8: Extract GLB file
-      logger.info('Extracting GLB file');
-      const glbResult = await client.predict("/extract_glb", {
-        mesh_simplify: options.mesh_simplify || 0.9,
-        texture_size: options.texture_size || 512
-      });
-
-      const totalTime = Math.round((Date.now() - startTime) / 1000);
+      // Step 3: Create temporary file for TRELLIS processing
+      const imageFilePath = await this.createImageFile(imageBuffer);
+      imageFile = { path: imageFilePath }; // Store for cleanup
       
-      // Extract GLB URL from result
-      const glbUrl = glbResult.data[1]?.url || glbResult.data[0]?.url;
+      logger.info('Using TRELLIS generation with temporary file', {
+        tempFilePath: imageFilePath
+      });
+
+      // Use the all-in-one endpoint directly 
+      const result = await this.generateModelFromImagesAndUpload(imageBuffer, options);
+      
+      if (!result.success) {
+        throw new Error(result.error || 'Generation failed');
+      }
+
+      const glbUrl = result.glbUrl;
+      const totalTime = Math.round((Date.now() - startTime) / 1000);
       
       logger.info('TRELLIS processing completed', {
         totalTimeSeconds: totalTime,
         glbUrl: glbUrl ? 'Generated' : 'Not found',
-        seed: finalSeed
+        seed: options.seed || 'random'
       });
+
+      // Clean up temporary file
+      await this.cleanupTempFile(imageFile.path);
 
       return {
         success: true,
@@ -123,10 +90,10 @@ export class TRELLISService {
         processingTimeSeconds: totalTime,
         backgroundRemovalConfidence: 0.9, // Assume good quality from preprocess
         modelQualityScore: 0.85, // Default quality score
-        modelId: `trellis_${Date.now()}_${finalSeed}`,
-        seed: finalSeed,
-        rawGenerationResult: generationResult.data,
-        rawGlbResult: glbResult.data
+        modelId: `trellis_${Date.now()}_${options.seed || 'random'}`,
+        seed: options.seed || 0,
+        rawGenerationResult: result.rawResult,
+        rawGlbResult: result.rawResult
       };
 
     } catch (error) {
@@ -136,6 +103,11 @@ export class TRELLISService {
         totalTimeSeconds: totalTime,
         stack: error.stack
       });
+
+      // Clean up temporary file even on error
+      if (imageFile?.path) {
+        await this.cleanupTempFile(imageFile.path);
+      }
 
       return {
         success: false,
@@ -151,18 +123,32 @@ export class TRELLISService {
    * @returns {Object} Gradio file object
    */
   async createImageFile(imageBuffer) {
-    // Convert buffer to base64 data URL
-    const base64 = imageBuffer.toString('base64');
-    const dataUrl = `data:image/jpeg;base64,${base64}`;
+    const fs = await import('fs/promises');
+    const path = await import('path');
+    const os = await import('os');
     
-    return {
-      image: {
-        path: dataUrl,
-        meta: { _type: "gradio.FileData" },
-        orig_name: "furniture_image.jpg",
-        url: dataUrl
-      }
-    };
+    // Create a temporary file with proper extension and shorter name
+    const tempDir = os.tmpdir();
+    const tempFileName = `img_${Date.now()}.jpg`; // Shorter filename
+    const tempFilePath = path.join(tempDir, tempFileName);
+    
+    try {
+      // Write buffer to temporary file
+      await fs.writeFile(tempFilePath, imageBuffer);
+      
+      logger.info('Created temporary file for TRELLIS processing', { 
+        tempFilePath,
+        fileSize: imageBuffer.length 
+      });
+
+      // Return the file path directly - Gradio client will handle the upload
+      return tempFilePath;
+      
+    } catch (error) {
+      logger.error('Failed to create temporary file', { error: error.message });
+      // If temp file creation fails, we need to throw an error instead of using data URL
+      throw new Error(`Failed to create temporary file for TRELLIS processing: ${error.message}`);
+    }
   }
 
   /**
@@ -221,19 +207,29 @@ export class TRELLISService {
    * @returns {Promise<Object>} Processing result with direct URL
    */
   async generateModelFromImagesAndUpload(imageBuffer, options = {}) {
+    let imageFile = null;
+    
     try {
       const client = await this.initClient();
-      const imageFile = await this.createImageFile(imageBuffer);
+      const imageFilePath = await this.createImageFile(imageBuffer);
+      imageFile = { path: imageFilePath }; // Store for cleanup
       
-      // Use the all-in-one endpoint that returns a direct URL
+      // Try the all-in-one endpoint that might be more lenient
+      logger.info('Using generate_model_from_images_and_upload endpoint');
+      
+      // Use handle_file to properly upload the file to Gradio
+      logger.info('Using handle_file for Gradio upload', { tempFile: imageFilePath });
+      
+      const fileData = handle_file(imageFilePath);
+      
       const result = await client.predict("/generate_model_from_images_and_upload", {
-        image_inputs: [imageFile],
+        image_inputs: [fileData],  // Use handle_file for proper upload
         seed_val: options.seed || 0,
         ss_guidance_strength_val: options.ss_guidance_strength || 7.5,
         ss_sampling_steps_val: options.ss_sampling_steps || 12,
         slat_guidance_strength_val: options.slat_guidance_strength || 3,
         slat_sampling_steps_val: options.slat_sampling_steps || 12,
-        multiimage_algo_val: options.multiimage_algo || "stochastic",
+        multiimage_algo_val: "stochastic",
         mesh_simplify_val: options.mesh_simplify || 0.9,
         texture_size_val: options.texture_size || 512
       });
@@ -245,6 +241,9 @@ export class TRELLISService {
         modelUrl: modelUrl ? 'Generated' : 'Failed',
         options 
       });
+
+      // Clean up temporary file
+      await this.cleanupTempFile(imageFile.path);
       
       return {
         success: !!modelUrl,
@@ -258,6 +257,11 @@ export class TRELLISService {
         error: error.message,
         stack: error.stack 
       });
+
+      // Clean up temporary file even on error
+      if (imageFile?.path) {
+        await this.cleanupTempFile(imageFile.path);
+      }
       
       return {
         success: false,
@@ -322,6 +326,74 @@ export class TRELLISService {
         error: error.message,
         processingTimeSeconds 
       });
+    }
+  }
+
+  /**
+   * Clean up temporary file
+   * @param {string} filePath - Path to temporary file
+   */
+  async cleanupTempFile(filePath) {
+    try {
+      if (filePath && !filePath.startsWith('data:')) {
+        const fs = await import('fs/promises');
+        await fs.unlink(filePath);
+        logger.info('Cleaned up temporary file', { filePath });
+      }
+    } catch (error) {
+      // Don't throw errors for cleanup failures
+      logger.warn('Failed to cleanup temporary file', { 
+        filePath, 
+        error: error.message 
+      });
+    }
+  }
+
+  /**
+   * Process multiple furniture images through TRELLIS pipeline
+   * This method takes the best/first image from the array and processes it
+   * @param {Buffer[]} imageBuffers - Array of image buffers
+   * @param {Object} options - Processing options
+   * @returns {Promise<Object>} Processing result
+   */
+  async processImages(imageBuffers, options = {}) {
+    if (!imageBuffers || imageBuffers.length === 0) {
+      throw new Error('No image buffers provided');
+    }
+
+    logger.info('Processing multiple images with TRELLIS', {
+      imageCount: imageBuffers.length,
+      orderId: options.orderId
+    });
+
+    // For now, use the first image as the primary image
+    // The TRELLIS "multi-image-to-3d" space should handle multiple images,
+    // but our current implementation focuses on the best single image
+    const primaryImageBuffer = imageBuffers[0];
+    
+    try {
+      const result = await this.processImage(primaryImageBuffer, options);
+      
+      logger.info('Multi-image processing completed', {
+        success: result.success,
+        orderId: options.orderId,
+        usedImageCount: 1,
+        totalProvidedImages: imageBuffers.length
+      });
+      
+      return result;
+    } catch (error) {
+      logger.error('Multi-image processing failed', {
+        error: error.message,
+        orderId: options.orderId,
+        imageCount: imageBuffers.length
+      });
+      
+      return {
+        success: false,
+        error: error.message,
+        processingTimeSeconds: 0
+      };
     }
   }
 }

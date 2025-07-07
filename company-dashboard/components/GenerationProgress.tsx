@@ -20,45 +20,138 @@ interface GenerationProgressProps {
   orderId: string
   attempts: GenerationAttempt[]
   currentStatus: 'idle' | 'generating' | 'completed' | 'failed'
+  currentStage?: string
   onSelectAttempt?: (attemptId: string) => void
   onRetryGeneration?: () => void
+}
+
+interface ProgressStage {
+  name: string
+  description: string
+  minPercent: number
+  maxPercent: number
+  duration: number // seconds
 }
 
 export default function GenerationProgress({
   orderId,
   attempts,
   currentStatus,
+  currentStage,
   onSelectAttempt,
   onRetryGeneration
 }: GenerationProgressProps) {
   const [progress, setProgress] = useState(0)
   const [statusMessage, setStatusMessage] = useState('')
+  const [currentStageIndex, setCurrentStageIndex] = useState(0)
+  const [stageStartTime, setStageStartTime] = useState<number | null>(null)
 
+  // Define TRELLIS processing stages
+  const stages: ProgressStage[] = [
+    {
+      name: 'uploading',
+      description: 'Uploading image...',
+      minPercent: 0,
+      maxPercent: 6,
+      duration: 3
+    },
+    {
+      name: 'background_removal',
+      description: 'Removing background',
+      minPercent: 6,
+      maxPercent: 12,
+      duration: 3
+    },
+    {
+      name: 'generating_3d',
+      description: 'Generating 3D model',
+      minPercent: 12,
+      maxPercent: 42,
+      duration: 15
+    },
+    {
+      name: 'extracting_glb',
+      description: 'Extracting GLB file',
+      minPercent: 42,
+      maxPercent: 100,
+      duration: 30
+    }
+  ]
+
+  // Update progress based on current stage or simulate realistic progress
   useEffect(() => {
     if (currentStatus === 'generating') {
-      // Simulate progress for better UX
-      const interval = setInterval(() => {
-        setProgress(prev => {
-          if (prev >= 90) return prev // Don't go to 100% until actually complete
-          return prev + Math.random() * 10
-        })
-      }, 2000)
+      if (currentStage) {
+        // Find stage index by name
+        const stageIndex = stages.findIndex(s => s.name === currentStage)
+        if (stageIndex !== -1) {
+          setCurrentStageIndex(stageIndex)
+          setStageStartTime(Date.now())
+          setProgress(stages[stageIndex].minPercent)
+        }
+      } else {
+        // Fallback: simulate realistic progress through stages
+        let currentTime = 0
+        const interval = setInterval(() => {
+          currentTime += 1
+          
+          // Determine current stage based on elapsed time
+          let totalTime = 0
+          let activeStageIndex = 0
+          
+          for (let i = 0; i < stages.length; i++) {
+            if (currentTime <= totalTime + stages[i].duration) {
+              activeStageIndex = i
+              break
+            }
+            totalTime += stages[i].duration
+          }
+          
+          setCurrentStageIndex(activeStageIndex)
+          
+          if (activeStageIndex < stages.length) {
+            const stage = stages[activeStageIndex]
+            const stageElapsed = currentTime - totalTime
+            const stageProgress = Math.min(1, stageElapsed / stage.duration)
+            const stagePercent = stage.minPercent + (stage.maxPercent - stage.minPercent) * stageProgress
+            
+            setProgress(Math.min(95, stagePercent)) // Cap at 95% until truly complete
+          }
+          
+          // Stop simulation after all stages
+          if (currentTime > stages.reduce((sum, s) => sum + s.duration, 0)) {
+            clearInterval(interval)
+          }
+        }, 1000)
 
-      return () => clearInterval(interval)
+        return () => clearInterval(interval)
+      }
     } else if (currentStatus === 'completed') {
       setProgress(100)
+      setCurrentStageIndex(stages.length)
+    } else if (currentStatus === 'failed') {
+      setProgress(0)
+      setCurrentStageIndex(0)
     }
-  }, [currentStatus])
+  }, [currentStatus, currentStage])
 
+  // Update status message based on current stage
   useEffect(() => {
-    const messages = {
-      idle: 'Ready to generate 3D model',
-      generating: 'Generating 3D model... This may take 1-2 minutes',
-      completed: '3D model generation complete!',
-      failed: 'Generation failed. Please try again.'
+    if (currentStatus === 'generating') {
+      if (currentStageIndex < stages.length) {
+        setStatusMessage(stages[currentStageIndex].description)
+      } else {
+        setStatusMessage('Finalizing 3D model...')
+      }
+    } else {
+      const messages = {
+        idle: 'Ready to generate 3D model',
+        completed: '3D model generation complete!',
+        failed: 'Generation failed. Please try again.'
+      }
+      setStatusMessage(messages[currentStatus as keyof typeof messages] || 'Unknown status')
     }
-    setStatusMessage(messages[currentStatus])
-  }, [currentStatus])
+  }, [currentStatus, currentStageIndex])
 
   const getStatusColor = (status: string) => {
     switch (status) {
@@ -104,12 +197,58 @@ export default function GenerationProgress({
 
         <p className="text-sm text-gray-600 mb-3">{statusMessage}</p>
 
-        {/* Progress Bar */}
+        {/* Stage Indicators */}
         {currentStatus === 'generating' && (
+          <div className="mb-4">
+            <div className="flex justify-between mb-2">
+              {stages.map((stage, index) => (
+                <div key={stage.name} className="flex items-center">
+                  <div className={`w-3 h-3 rounded-full border-2 ${
+                    index < currentStageIndex 
+                      ? 'bg-green-500 border-green-500' 
+                      : index === currentStageIndex
+                      ? 'bg-blue-500 border-blue-500 animate-pulse'
+                      : 'bg-gray-200 border-gray-300'
+                  }`}></div>
+                  <span className={`ml-2 text-xs ${
+                    index <= currentStageIndex ? 'text-gray-900' : 'text-gray-400'
+                  }`}>
+                    {stage.description}
+                  </span>
+                </div>
+              ))}
+            </div>
+            
+            {/* Overall Progress Bar */}
+            <div className="w-full bg-gray-200 rounded-full h-3 mb-2">
+              <div 
+                className="bg-blue-600 h-3 rounded-full transition-all duration-500 ease-out relative overflow-hidden"
+                style={{ width: `${progress}%` }}
+              >
+                <div className="absolute inset-0 bg-gradient-to-r from-transparent via-white to-transparent opacity-20 animate-pulse"></div>
+              </div>
+            </div>
+            
+            <div className="flex justify-between text-xs text-gray-500">
+              <span>{Math.round(progress)}% complete</span>
+              <span>
+                Stage {currentStageIndex + 1} of {stages.length}
+                {currentStageIndex < stages.length && (
+                  <> • Est. {stages[currentStageIndex].duration}s</>
+                )}
+              </span>
+            </div>
+          </div>
+        )}
+
+        {/* Simple Progress Bar for Non-Generating States */}
+        {(currentStatus === 'completed' || currentStatus === 'failed') && (
           <div className="w-full bg-gray-200 rounded-full h-2 mb-3">
             <div 
-              className="bg-blue-600 h-2 rounded-full transition-all duration-1000 ease-out"
-              style={{ width: `${progress}%` }}
+              className={`h-2 rounded-full ${
+                currentStatus === 'completed' ? 'bg-green-500' : 'bg-red-500'
+              }`}
+              style={{ width: '100%' }}
             ></div>
           </div>
         )}

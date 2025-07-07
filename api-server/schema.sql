@@ -54,10 +54,21 @@ CREATE TABLE measurements (
     updated_at TIMESTAMPTZ DEFAULT NOW()
 );
 
+-- Photo Sets Table
+CREATE TABLE photo_sets (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    order_id UUID NOT NULL REFERENCES orders(id) ON DELETE CASCADE,
+    name VARCHAR(255) NOT NULL,
+    photo_count INTEGER DEFAULT 0,
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+
 -- Photo Storage Table
 CREATE TABLE order_photos (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     order_id UUID NOT NULL REFERENCES orders(id) ON DELETE CASCADE,
+    photo_set_id UUID REFERENCES photo_sets(id) ON DELETE SET NULL,
     filename VARCHAR(255) NOT NULL,
     file_path VARCHAR(500) NOT NULL,
     file_size INTEGER,
@@ -79,6 +90,10 @@ CREATE TABLE generation_attempts (
     error_message TEXT,
     glb_url VARCHAR(500),
     selected BOOLEAN DEFAULT FALSE,
+    archived BOOLEAN DEFAULT FALSE,
+    archived_at TIMESTAMPTZ,
+    archive_reason VARCHAR(100), -- 'version_limit', 'manual', 'quality_score'
+    last_accessed_at TIMESTAMPTZ DEFAULT NOW(),
     created_at TIMESTAMPTZ DEFAULT NOW()
 );
 
@@ -102,6 +117,19 @@ CREATE TABLE gpu_usage_log (
     generation_count INTEGER DEFAULT 0,
     last_reset_at TIMESTAMPTZ DEFAULT NOW(),
     UNIQUE(date)
+);
+
+-- Generation queue for when daily limits are exceeded
+CREATE TABLE generation_queue (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    order_id UUID NOT NULL REFERENCES orders(id) ON DELETE CASCADE,
+    photo_ids UUID[] NOT NULL, -- Array of photo IDs to use for generation
+    generation_options JSONB DEFAULT '{}', -- Seed, quality settings, etc.
+    queue_position INTEGER NOT NULL,
+    scheduled_date DATE NOT NULL, -- When this will be processed
+    status VARCHAR(50) DEFAULT 'queued', -- queued, processing, completed, failed
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    processed_at TIMESTAMPTZ
 );
 
 -- Enable Row Level Security

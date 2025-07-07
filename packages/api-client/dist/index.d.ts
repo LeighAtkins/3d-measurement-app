@@ -4,6 +4,7 @@ export declare class ApiClient {
     constructor(baseUrl?: string);
     setToken(token: string): void;
     clearToken(): void;
+    getToken(): string | null;
     private makeRequest;
     request(url: string, options?: RequestInit): Promise<any>;
     login(email: string, password: string): Promise<any>;
@@ -16,6 +17,16 @@ export declare class ApiClient {
     createMeasurement(orderId: string, data: any): Promise<any>;
     updateMeasurement(orderId: string, measurementId: string, data: any): Promise<any>;
     deleteMeasurement(orderId: string, measurementId: string): Promise<any>;
+    getOrderPhotos(orderId: string): Promise<any>;
+    addPhotosToOrder(orderId: string, files: File[]): Promise<any>;
+    deletePhoto(photoId: string): Promise<any>;
+    bulkDeletePhotos(orderId: string, photoIds: string[]): Promise<any>;
+    regenerateWithPhotos(orderId: string, photoIds: string[], photoSetName?: string): Promise<any>;
+    getPhotoSets(orderId: string): Promise<any>;
+    createPhotoSet(orderId: string, name: string, photoIds: string[]): Promise<any>;
+    updatePhotoSet(photoSetId: string, photoIds: string[]): Promise<any>;
+    getGenerationAttemptPhotos(attemptId: string): Promise<any>;
+    getGPUQuota(): Promise<any>;
 }
 export declare function checkTokenExpiry(): boolean;
 export default ApiClient;

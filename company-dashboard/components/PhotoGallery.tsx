@@ -1,6 +1,7 @@
 'use client'
 
 import { useState } from 'react'
+import { validatePhotos, PhotoValidation, formatValidationIssues } from '../utils/photoValidation'
 
 interface Photo {
   id: string
@@ -14,11 +15,148 @@ interface Photo {
 interface PhotoGalleryProps {
   photos: Photo[]
   onDeletePhoto?: (photoId: string) => void
+  onUploadMore?: (files: File[]) => void
+  onDeleteSelected?: (photoIds: string[]) => void
+  onRegenerateWithSelected?: (photoIds: string[]) => void
   canDelete?: boolean
+  canUploadMore?: boolean
+  canBulkDelete?: boolean
+  canRegenerate?: boolean
+  maxPhotos?: number
 }
 
-export default function PhotoGallery({ photos, onDeletePhoto, canDelete = false }: PhotoGalleryProps) {
+export default function PhotoGallery({ 
+  photos, 
+  onDeletePhoto, 
+  onUploadMore,
+  onDeleteSelected,
+  onRegenerateWithSelected,
+  canDelete = false,
+  canUploadMore = false,
+  canBulkDelete = false,
+  canRegenerate = false,
+  maxPhotos = 20
+}: PhotoGalleryProps) {
   const [selectedPhoto, setSelectedPhoto] = useState<Photo | null>(null)
+  const [isDragOver, setIsDragOver] = useState(false)
+  const [validationResults, setValidationResults] = useState<PhotoValidation[]>([])
+  const [isValidating, setIsValidating] = useState(false)
+  const [selectedPhotos, setSelectedPhotos] = useState<Set<string>>(new Set())
+  const [isSelectionMode, setIsSelectionMode] = useState(false)
+
+  const handleFileSelect = async (files: FileList | null) => {
+    if (!files || !onUploadMore) return
+    
+    const fileArray = Array.from(files)
+    const validFiles = fileArray.filter(file => {
+      // Basic validation
+      const isImage = file.type.startsWith('image/')
+      const isUnderLimit = photos.length + fileArray.length <= maxPhotos
+      return isImage && isUnderLimit
+    })
+    
+    if (validFiles.length === 0) {
+      alert('No valid image files selected or photo limit reached.')
+      return
+    }
+
+    // Validate photo quality
+    setIsValidating(true)
+    try {
+      const validations = await validatePhotos(validFiles)
+      setValidationResults(validations)
+      
+      // Check if any photos have severe issues
+      const poorPhotos = validations.filter(v => v.status === 'poor' && !v.canProceed)
+      if (poorPhotos.length > 0) {
+        const fileNames = poorPhotos.map((_, i) => validFiles[i].name).join(', ')
+        alert(`Cannot upload files with severe quality issues: ${fileNames}`)
+        return
+      }
+      
+      // Show warning for photos with issues
+      const warningPhotos = validations.filter(v => v.status === 'warning' || (v.status === 'poor' && v.canProceed))
+      if (warningPhotos.length > 0) {
+        const issues = warningPhotos.map((v, i) => `${validFiles[i].name}: ${formatValidationIssues(v.issues)}`).join('\n')
+        const proceed = confirm(`Some photos have quality issues:\n\n${issues}\n\nProceed with upload?`)
+        if (!proceed) return
+      }
+      
+      onUploadMore(validFiles)
+    } catch (error) {
+      console.error('Photo validation failed:', error)
+      // Still allow upload if validation fails
+      onUploadMore(validFiles)
+    } finally {
+      setIsValidating(false)
+    }
+  }
+
+  const handleSelectPhoto = (photoId: string) => {
+    setSelectedPhotos(prev => {
+      const newSet = new Set(prev)
+      if (newSet.has(photoId)) {
+        newSet.delete(photoId)
+      } else {
+        newSet.add(photoId)
+      }
+      return newSet
+    })
+  }
+
+  const handleSelectAll = () => {
+    if (selectedPhotos.size === photos.length) {
+      setSelectedPhotos(new Set())
+    } else {
+      setSelectedPhotos(new Set(photos.map(p => p.id)))
+    }
+  }
+
+  const handleBulkDelete = () => {
+    if (selectedPhotos.size === 0) return
+    
+    const selectedCount = selectedPhotos.size
+    if (!confirm(`Are you sure you want to delete ${selectedCount} selected photo${selectedCount > 1 ? 's' : ''}?`)) {
+      return
+    }
+    
+    if (onDeleteSelected) {
+      onDeleteSelected(Array.from(selectedPhotos))
+      setSelectedPhotos(new Set())
+      setIsSelectionMode(false)
+    }
+  }
+
+  const handleRegenerateSelected = () => {
+    if (selectedPhotos.size === 0) return
+    
+    if (onRegenerateWithSelected) {
+      onRegenerateWithSelected(Array.from(selectedPhotos))
+      setSelectedPhotos(new Set())
+      setIsSelectionMode(false)
+    }
+  }
+
+  const toggleSelectionMode = () => {
+    setIsSelectionMode(!isSelectionMode)
+    setSelectedPhotos(new Set())
+  }
+
+  const handleDragOver = (e: React.DragEvent) => {
+    e.preventDefault()
+    setIsDragOver(true)
+  }
+
+  const handleDragLeave = (e: React.DragEvent) => {
+    e.preventDefault()
+    setIsDragOver(false)
+  }
+
+  const handleDrop = (e: React.DragEvent) => {
+    e.preventDefault()
+    setIsDragOver(false)
+    handleFileSelect(e.dataTransfer.files)
+  }
 
   const formatFileSize = (bytes: number): string => {
     if (bytes === 0) return '0 Bytes'
@@ -64,21 +202,147 @@ export default function PhotoGallery({ photos, onDeletePhoto, canDelete = false 
   return (
     <div className="space-y-4">
       <div className="flex justify-between items-center">
-        <h3 className="text-lg font-medium text-gray-900">
-          Uploaded Photos ({photos.length})
-        </h3>
-        <div className="text-sm text-gray-500">
-          Total size: {formatFileSize(photos.reduce((sum, photo) => sum + photo.file_size, 0))}
+        <div>
+          <h3 className="text-lg font-medium text-gray-900">
+            Uploaded Photos ({photos.length})
+          </h3>
+          <div className="text-sm text-gray-500">
+            Total size: {formatFileSize(photos.reduce((sum, photo) => sum + photo.file_size, 0))}
+            {isSelectionMode && selectedPhotos.size > 0 && (
+              <span className="ml-2 text-blue-600 font-medium">
+                • {selectedPhotos.size} selected
+              </span>
+            )}
+          </div>
         </div>
+        
+        {(canBulkDelete || canRegenerate) && photos.length > 0 && (
+          <div className="flex items-center space-x-2">
+            {!isSelectionMode ? (
+              <button
+                onClick={toggleSelectionMode}
+                className="px-3 py-1 text-sm bg-gray-100 text-gray-700 rounded hover:bg-gray-200"
+              >
+                Select Photos
+              </button>
+            ) : (
+              <>
+                <button
+                  onClick={handleSelectAll}
+                  className="px-3 py-1 text-sm bg-blue-100 text-blue-700 rounded hover:bg-blue-200"
+                >
+                  {selectedPhotos.size === photos.length ? 'Deselect All' : 'Select All'}
+                </button>
+                
+                {selectedPhotos.size > 0 && (
+                  <>
+                    {canBulkDelete && (
+                      <button
+                        onClick={handleBulkDelete}
+                        className="px-3 py-1 text-sm bg-red-100 text-red-700 rounded hover:bg-red-200"
+                      >
+                        Delete ({selectedPhotos.size})
+                      </button>
+                    )}
+                    
+                    {canRegenerate && (
+                      <button
+                        onClick={handleRegenerateSelected}
+                        className="px-3 py-1 text-sm bg-green-100 text-green-700 rounded hover:bg-green-200"
+                      >
+                        Regenerate ({selectedPhotos.size})
+                      </button>
+                    )}
+                  </>
+                )}
+                
+                <button
+                  onClick={toggleSelectionMode}
+                  className="px-3 py-1 text-sm bg-gray-100 text-gray-700 rounded hover:bg-gray-200"
+                >
+                  Cancel
+                </button>
+              </>
+            )}
+          </div>
+        )}
       </div>
 
       {/* Photo Grid */}
       <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-4">
+        {/* Upload More Photos Card */}
+        {canUploadMore && photos.length < maxPhotos && (
+          <div 
+            className={`aspect-square border-2 border-dashed rounded-lg flex flex-col items-center justify-center cursor-pointer transition-colors ${
+              isDragOver 
+                ? 'border-blue-500 bg-blue-50' 
+                : 'border-gray-300 hover:border-gray-400 hover:bg-gray-50'
+            }`}
+            onDragOver={handleDragOver}
+            onDragLeave={handleDragLeave}
+            onDrop={handleDrop}
+            onClick={() => {
+              const input = document.createElement('input')
+              input.type = 'file'
+              input.multiple = true
+              input.accept = 'image/*'
+              input.onchange = (e) => handleFileSelect((e.target as HTMLInputElement).files)
+              input.click()
+            }}
+          >
+            <svg
+              className="w-8 h-8 text-gray-400 mb-2"
+              fill="none"
+              viewBox="0 0 24 24"
+              stroke="currentColor"
+            >
+              <path
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                strokeWidth={2}
+                d="M12 4v16m8-8H4"
+              />
+            </svg>
+            <p className="text-sm text-gray-600 text-center px-2">
+              {isValidating ? 'Validating...' : 'Add More Photos'}
+            </p>
+            <p className="text-xs text-gray-500 text-center px-2 mt-1">
+              {photos.length}/{maxPhotos} used
+            </p>
+          </div>
+        )}
+
         {photos.map((photo) => (
-          <div key={photo.id} className="relative group">
+          <div 
+            key={photo.id} 
+            className={`relative group ${
+              isSelectionMode && selectedPhotos.has(photo.id) 
+                ? 'ring-2 ring-blue-500 ring-offset-2' 
+                : ''
+            }`}
+          >
+            {/* Selection Checkbox */}
+            {isSelectionMode && (
+              <div className="absolute top-2 left-2 z-10">
+                <input
+                  type="checkbox"
+                  checked={selectedPhotos.has(photo.id)}
+                  onChange={() => handleSelectPhoto(photo.id)}
+                  className="w-4 h-4 text-blue-600 bg-white border-gray-300 rounded focus:ring-blue-500 focus:ring-2"
+                  onClick={(e) => e.stopPropagation()}
+                />
+              </div>
+            )}
+            
             <div 
               className="aspect-square bg-gray-100 rounded-lg overflow-hidden cursor-pointer hover:opacity-90 transition-opacity"
-              onClick={() => setSelectedPhoto(photo)}
+              onClick={() => {
+                if (isSelectionMode) {
+                  handleSelectPhoto(photo.id)
+                } else {
+                  setSelectedPhoto(photo)
+                }
+              }}
             >
               <img
                 src={getImageSrc(photo)}
@@ -102,7 +366,7 @@ export default function PhotoGallery({ photos, onDeletePhoto, canDelete = false 
             </div>
 
             {/* Delete Button */}
-            {canDelete && onDeletePhoto && (
+            {canDelete && onDeletePhoto && !isSelectionMode && (
               <button
                 onClick={(e) => {
                   e.stopPropagation()

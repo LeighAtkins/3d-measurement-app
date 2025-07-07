@@ -16,8 +16,19 @@ export default function CompanyLoginPage() {
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
+    
+    // Prevent multiple submissions
+    if (loading) return
+    
     setLoading(true)
     setError(null)
+
+    // Client-side validation
+    if (!formData.email || !formData.password || !formData.subdomain) {
+      setError('All fields are required')
+      setLoading(false)
+      return
+    }
 
     try {
       const apiClient = new ApiClient()
@@ -36,11 +47,16 @@ export default function CompanyLoginPage() {
         throw new Error('Invalid subdomain for this company account.')
       }
 
-      // Redirect to company dashboard
-      router.push(`/company/${formData.subdomain}/orders`)
+      // Clear form data immediately for security
+      setFormData({ email: '', password: '', subdomain: 'acme' })
+      
+      // Use replace instead of push to prevent back button issues
+      router.replace(`/company/${formData.subdomain}/orders`)
       
     } catch (err: any) {
       setError(err.message || 'Login failed')
+      // Clear password on error for security
+      setFormData(prev => ({ ...prev, password: '' }))
     } finally {
       setLoading(false)
     }
@@ -58,7 +74,7 @@ export default function CompanyLoginPage() {
           </p>
         </div>
         
-        <form className="mt-8 space-y-6" onSubmit={handleSubmit}>
+        <form className="mt-8 space-y-6" onSubmit={handleSubmit} method="post" autoComplete="off">
           <div className="rounded-md shadow-sm space-y-4">
             <div>
               <label htmlFor="subdomain" className="block text-sm font-medium text-gray-700">
@@ -102,11 +118,13 @@ export default function CompanyLoginPage() {
                 id="password"
                 name="password"
                 type="password"
-                autoComplete="current-password"
+                autoComplete="new-password"
                 value={formData.password}
                 onChange={(e) => setFormData(prev => ({ ...prev, password: e.target.value }))}
                 className="mt-1 relative block w-full border border-gray-300 rounded-md px-3 py-2 text-gray-900 bg-white placeholder-gray-500 focus:outline-none focus:ring-blue-500 focus:border-blue-500 focus:z-10"
                 placeholder="Enter your password"
+                autoSave="off"
+                spellCheck="false"
                 required
               />
             </div>

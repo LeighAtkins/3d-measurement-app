@@ -2,19 +2,338 @@
 
 import { Suspense, useRef, useState, useEffect } from 'react'
 import { Canvas, useFrame, useThree } from '@react-three/fiber'
-import { OrbitControls, useGLTF, Html, Center, Line } from '@react-three/drei'
+import { OrbitControls, useGLTF, Html, Center, Line, Sphere, Text } from '@react-three/drei'
 import * as THREE from 'three'
+
+export interface CustomMeasurement {
+  id: string
+  label: string
+  start_point: THREE.Vector3
+  end_point: THREE.Vector3
+  distance: number
+  unit: string
+  color?: string
+  notes?: string
+  visible?: boolean
+}
 
 interface ModelProps {
   url?: string
   onPointClick?: (point: THREE.Vector3) => void
   onDimensionClick?: (dimension: { label: string, start_point: THREE.Vector3, end_point: THREE.Vector3, value: number }) => void
   showDimensions?: boolean
+  customMeasurements?: CustomMeasurement[]
+  temporaryMeasurement?: { start: THREE.Vector3, end?: THREE.Vector3 } | null
+  measurementMode?: boolean
+  onMeasurementSelect?: (measurement: CustomMeasurement) => void
+  onMeasurementHover?: (measurementId: string, hovered: boolean) => void
+  selectedMeasurementId?: string
+  hoveredMeasurementId?: string
 }
 
-function Model({ url, onPointClick, onDimensionClick, showDimensions = true }: ModelProps) {
-  const { scene } = useGLTF(url || '/models/default.glb')
+// MeasurementLine Component - Updated to match SurfaceDimensionLine styling
+interface MeasurementLineProps {
+  start: THREE.Vector3
+  end: THREE.Vector3
+  label: string
+  unit?: string
+  color?: string
+  visible?: boolean
+  isHighlighted?: boolean
+  onHover?: (hovered: boolean) => void
+  onClick?: () => void
+}
+
+function MeasurementLine({ 
+  start, 
+  end, 
+  label, 
+  unit = 'cm',
+  color = '#ef4444', // Match dimension red
+  visible = true,
+  isHighlighted = false,
+  onHover,
+  onClick
+}: MeasurementLineProps) {
+  const lineRef = useRef<THREE.Group>(null)
+  
+  if (!visible) return null
+  
+  const direction = new THREE.Vector3().subVectors(end, start).normalize()
+  const distance = start.distanceTo(end)
+  const midPoint = new THREE.Vector3().addVectors(start, end).multiplyScalar(0.5)
+  
+  const displayValue = `${distance.toFixed(1)} ${unit}`
+  const displayColor = isHighlighted ? '#fbbf24' : color // Amber when highlighted
+  
+  // Create arrow quaternions for proper rotation - matching SurfaceDimensionLine
+  const upVector = new THREE.Vector3(0, 1, 0)
+  const quaternion1 = new THREE.Quaternion().setFromUnitVectors(upVector, direction.clone().multiplyScalar(-1))
+  const quaternion2 = new THREE.Quaternion().setFromUnitVectors(upVector, direction.clone())
+
+  return (
+    <group 
+      ref={lineRef}
+      onPointerOver={() => onHover?.(true)}
+      onPointerOut={() => onHover?.(false)}
+      onClick={onClick}
+    >
+      {/* Main dimension line - exact match to SurfaceDimensionLine */}
+      <Line 
+        points={[start, end]} 
+        color={displayColor} 
+        lineWidth={2} 
+        transparent
+        opacity={isHighlighted ? 1 : 0.8}
+      />
+      
+      {/* Arrow heads using cones with quaternion rotation - exact match */}
+      <mesh position={start} quaternion={quaternion1}>
+        <coneGeometry args={[0.02, 0.06, 8]} />
+        <meshBasicMaterial color={displayColor} />
+      </mesh>
+      
+      <mesh position={end} quaternion={quaternion2}>
+        <coneGeometry args={[0.02, 0.06, 8]} />
+        <meshBasicMaterial color={displayColor} />
+      </mesh>
+      
+      {/* HTML Label - exact match to SurfaceDimensionLine styling */}
+      <Html 
+        position={midPoint}
+        center
+        transform={false}
+        sprite
+        style={{ 
+          pointerEvents: onClick ? 'auto' : 'none',
+          transition: 'all 0.2s ease',
+          opacity: isHighlighted ? 1 : 0.9
+        }}
+      >
+        <div 
+          className="bg-white px-2 py-1 rounded shadow border border-gray-300"
+          style={{
+            fontSize: '11px',
+            lineHeight: '1.3',
+            minWidth: 'max-content',
+            whiteSpace: 'nowrap',
+            transform: 'scale(0.75)',
+            transformOrigin: 'center',
+            cursor: onClick ? 'pointer' : 'default'
+          }}
+          onClick={onClick}
+        >
+          <div className="font-semibold text-gray-800" style={{ margin: '0', padding: '0' }}>
+            {label}
+          </div>
+          <div className="text-red-600" style={{ margin: '0', padding: '0' }}>
+            {displayValue}
+          </div>
+        </div>
+      </Html>
+    </group>
+  )
+}
+
+// MeasurementMarker Component - Updated for standardized appearance
+interface MeasurementMarkerProps {
+  position: THREE.Vector3
+  type?: 'start' | 'end' | 'point'
+  size?: number
+  visible?: boolean
+  onHover?: (hovered: boolean) => void
+  onClick?: () => void
+}
+
+function MeasurementMarker({ 
+  position, 
+  type = 'point',
+  size = 0.05,
+  visible = true,
+  onHover,
+  onClick
+}: MeasurementMarkerProps) {
+  const [hovered, setHovered] = useState(false)
+  
+  if (!visible) return null
+  
+  const colors = {
+    start: '#10b981', // Green
+    end: '#ef4444',   // Red (matches dimension color)
+    point: '#3b82f6'  // Blue
+  }
+  
+  const color = colors[type] || colors.point
+  const scale = hovered ? 1.2 : 1
+  
+  return (
+    <Sphere
+      args={[size, 16, 16]}
+      position={position}
+      scale={scale}
+      onPointerOver={() => {
+        setHovered(true)
+        onHover?.(true)
+      }}
+      onPointerOut={() => {
+        setHovered(false)
+        onHover?.(false)
+      }}
+      onClick={onClick}
+    >
+      <meshStandardMaterial
+        color={color}
+        emissive={color}
+        emissiveIntensity={hovered ? 0.6 : 0.3}
+        roughness={0.4}
+        metalness={0.6}
+        transparent
+        opacity={hovered ? 1 : 0.8}
+      />
+    </Sphere>
+  )
+}
+
+// MeasurementOverlay Component - Updated with unified components and interactions
+interface MeasurementOverlayProps {
+  customMeasurements?: CustomMeasurement[]
+  temporaryMeasurement?: { start: THREE.Vector3, end?: THREE.Vector3 } | null
+  onMeasurementSelect?: (measurement: CustomMeasurement) => void
+  onMeasurementHover?: (measurementId: string, hovered: boolean) => void
+  selectedMeasurementId?: string
+  hoveredMeasurementId?: string
+}
+
+function MeasurementOverlay({ 
+  customMeasurements = [], 
+  temporaryMeasurement,
+  onMeasurementSelect,
+  onMeasurementHover,
+  selectedMeasurementId,
+  hoveredMeasurementId
+}: MeasurementOverlayProps) {
+  return (
+    <group>
+      {/* Render saved measurements */}
+      {customMeasurements.map((measurement) => (
+        measurement.visible !== false && (
+          <group key={measurement.id}>
+            <MeasurementLine
+              start={measurement.start_point}
+              end={measurement.end_point}
+              label={measurement.label}
+              unit={measurement.unit}
+              visible={measurement.visible}
+              isHighlighted={hoveredMeasurementId === measurement.id || selectedMeasurementId === measurement.id}
+              onHover={(hovered) => onMeasurementHover?.(measurement.id, hovered)}
+              onClick={() => onMeasurementSelect?.(measurement)}
+            />
+            <MeasurementMarker
+              position={measurement.start_point}
+              type="start"
+              visible={measurement.visible}
+              onHover={(hovered) => onMeasurementHover?.(measurement.id, hovered)}
+              onClick={() => onMeasurementSelect?.(measurement)}
+            />
+            <MeasurementMarker
+              position={measurement.end_point}
+              type="end"
+              visible={measurement.visible}
+              onHover={(hovered) => onMeasurementHover?.(measurement.id, hovered)}
+              onClick={() => onMeasurementSelect?.(measurement)}
+            />
+          </group>
+        )
+      ))}
+      
+      {/* Render temporary measurement (while selecting) */}
+      {temporaryMeasurement && (
+        <group>
+          <MeasurementMarker
+            position={temporaryMeasurement.start}
+            type="start"
+          />
+          {temporaryMeasurement.end && (
+            <>
+              <MeasurementLine
+                start={temporaryMeasurement.start}
+                end={temporaryMeasurement.end}
+                label="Measuring..."
+                color="#fbbf24" // Amber for temporary measurements
+              />
+              <MeasurementMarker
+                position={temporaryMeasurement.end}
+                type="end"
+              />
+            </>
+          )}
+        </group>
+      )}
+    </group>
+  )
+}
+
+function Model({ 
+  url, 
+  onPointClick, 
+  onDimensionClick, 
+  showDimensions = true, 
+  customMeasurements, 
+  temporaryMeasurement,
+  measurementMode,
+  onMeasurementSelect,
+  onMeasurementHover,
+  selectedMeasurementId,
+  hoveredMeasurementId
+}: ModelProps) {
+  const { scene } = useGLTF(url || '/sample-models/cube.glb')
   const meshRef = useRef<THREE.Group>(null)
+
+  // Debug: Log the loaded scene to check textures
+  useEffect(() => {
+    if (scene) {
+      console.log('Loaded 3D scene:', scene)
+      scene.traverse((child) => {
+        if (child instanceof THREE.Mesh) {
+          console.log('Mesh found:', child.name, 'Material:', child.material)
+          if (child.material && 'map' in child.material) {
+            const material = child.material as THREE.MeshStandardMaterial
+            console.log('Texture map:', material.map)
+            console.log('Texture loaded:', material.map?.image)
+            console.log('Material properties:', {
+              metalness: material.metalness,
+              roughness: material.roughness,
+              color: material.color,
+              opacity: material.opacity
+            })
+            
+            // Fix material properties to show texture properly
+            if (material.map) {
+              material.map.flipY = false
+              material.map.needsUpdate = true
+              
+              // Reduce metalness so texture is visible (not pure metal reflection)
+              material.metalness = 0.1
+              
+              // Adjust roughness for better texture visibility
+              material.roughness = 0.8
+              
+              // Ensure color doesn't interfere with texture
+              material.color.setHex(0xffffff)
+              
+              material.needsUpdate = true
+              
+              console.log('Fixed material properties:', {
+                metalness: material.metalness,
+                roughness: material.roughness,
+                color: material.color
+              })
+            }
+          }
+        }
+      })
+    }
+  }, [scene])
 
   const handleClick = (event: any) => {
     if (onPointClick && event.intersections && event.intersections[0]) {
@@ -31,12 +350,31 @@ function Model({ url, onPointClick, onDimensionClick, showDimensions = true }: M
         onClick={handleClick}
         scale={1}
       />
-      {showDimensions && <IkeaStyleDimensions object={scene} onDimensionClick={onDimensionClick} />}
+      {showDimensions && <IkeaStyleDimensions object={scene} onDimensionClick={onDimensionClick} measurementMode={measurementMode} />}
+      <MeasurementOverlay 
+        customMeasurements={customMeasurements}
+        temporaryMeasurement={temporaryMeasurement}
+        onMeasurementSelect={onMeasurementSelect}
+        onMeasurementHover={onMeasurementHover}
+        selectedMeasurementId={selectedMeasurementId}
+        hoveredMeasurementId={hoveredMeasurementId}
+      />
     </group>
   )
 }
 
-function FallbackModel({ onPointClick, onDimensionClick, showDimensions = true }: ModelProps) {
+function FallbackModel({ 
+  onPointClick, 
+  onDimensionClick, 
+  showDimensions = true, 
+  customMeasurements, 
+  temporaryMeasurement,
+  measurementMode,
+  onMeasurementSelect,
+  onMeasurementHover,
+  selectedMeasurementId,
+  hoveredMeasurementId
+}: ModelProps) {
   const meshRef = useRef<THREE.Mesh>(null)
   const groupRef = useRef<THREE.Group>(null)
 
@@ -54,8 +392,16 @@ function FallbackModel({ onPointClick, onDimensionClick, showDimensions = true }
         <meshStandardMaterial color="#10b981" transparent opacity={0.8} />
       </mesh>
       {showDimensions && groupRef.current && (
-        <IkeaStyleDimensions object={groupRef.current} onDimensionClick={onDimensionClick} />
+        <IkeaStyleDimensions object={groupRef.current} onDimensionClick={onDimensionClick} measurementMode={measurementMode} />
       )}
+      <MeasurementOverlay 
+        customMeasurements={customMeasurements}
+        temporaryMeasurement={temporaryMeasurement}
+        onMeasurementSelect={onMeasurementSelect}
+        onMeasurementHover={onMeasurementHover}
+        selectedMeasurementId={selectedMeasurementId}
+        hoveredMeasurementId={hoveredMeasurementId}
+      />
     </group>
   )
 }
@@ -63,15 +409,31 @@ function FallbackModel({ onPointClick, onDimensionClick, showDimensions = true }
 interface IkeaStyleDimensionsProps {
   object: THREE.Object3D
   onDimensionClick?: (dimension: { label: string, start_point: THREE.Vector3, end_point: THREE.Vector3, value: number }) => void
+  measurementMode?: boolean
 }
 
-function IkeaStyleDimensions({ object, onDimensionClick }: IkeaStyleDimensionsProps) {
+interface DimensionData {
+  bbox: THREE.Box3
+  cameraPosition: THREE.Vector3
+  useTopEdge: boolean
+  useRightEdge: boolean
+  useFrontZ: boolean
+}
+
+function IkeaStyleDimensions({ object, onDimensionClick, measurementMode = false }: IkeaStyleDimensionsProps) {
   const { camera } = useThree()
   const [bbox, setBbox] = useState<THREE.Box3 | null>(null)
   const [cameraPosition, setCameraPosition] = useState(new THREE.Vector3())
+  
+  // Cache dimension data when entering measurement mode
+  const cachedDimensionData = useRef<DimensionData | null>(null)
+  const previousMeasurementMode = useRef(measurementMode)
 
   useFrame(() => {
-    setCameraPosition(camera.position.clone())
+    // Only update camera position if not in measurement mode or no cached data exists
+    if (!measurementMode || !cachedDimensionData.current) {
+      setCameraPosition(camera.position.clone())
+    }
   })
 
   useEffect(() => {
@@ -81,17 +443,58 @@ function IkeaStyleDimensions({ object, onDimensionClick }: IkeaStyleDimensionsPr
     }
   }, [object])
 
+  // Cache dimension state when entering measurement mode
+  useEffect(() => {
+    if (measurementMode && !previousMeasurementMode.current && bbox) {
+      // Entering measurement mode - cache current state
+      const center = new THREE.Vector3().addVectors(bbox.min, bbox.max).multiplyScalar(0.5)
+      cachedDimensionData.current = {
+        bbox: bbox.clone(),
+        cameraPosition: cameraPosition.clone(),
+        useTopEdge: cameraPosition.y > center.y,
+        useRightEdge: cameraPosition.x > center.x,
+        useFrontZ: cameraPosition.z > center.z
+      }
+    } else if (!measurementMode && previousMeasurementMode.current) {
+      // Exiting measurement mode - clear cache
+      cachedDimensionData.current = null
+    }
+    previousMeasurementMode.current = measurementMode
+  }, [measurementMode, bbox, cameraPosition])
+
   if (!bbox) return null
 
-  const min = bbox.min
-  const max = bbox.max
+  // Use cached data if in measurement mode, otherwise use current data
+  const activeData = measurementMode && cachedDimensionData.current 
+    ? cachedDimensionData.current 
+    : {
+        bbox,
+        cameraPosition,
+        useTopEdge: false,
+        useRightEdge: false,
+        useFrontZ: false
+      }
+
+  // Calculate values from active data
+  const min = activeData.bbox.min
+  const max = activeData.bbox.max
   const center = new THREE.Vector3().addVectors(min, max).multiplyScalar(0.5)
   const size = new THREE.Vector3().subVectors(max, min)
 
-  // Choose edges based on camera position (front-facing bias)
-  const useTopEdge = cameraPosition.y > center.y     // Camera is above center
-  const useRightEdge = cameraPosition.x > center.x   // Camera is to the right of center
-  const useFrontZ = cameraPosition.z > center.z      // Camera is in front
+  // Choose edges based on active camera position or cached values
+  let useTopEdge: boolean, useRightEdge: boolean, useFrontZ: boolean
+  
+  if (measurementMode && cachedDimensionData.current) {
+    // Use cached edge calculations
+    useTopEdge = cachedDimensionData.current.useTopEdge
+    useRightEdge = cachedDimensionData.current.useRightEdge
+    useFrontZ = cachedDimensionData.current.useFrontZ
+  } else {
+    // Calculate edges based on current camera position
+    useTopEdge = cameraPosition.y > center.y     // Camera is above center
+    useRightEdge = cameraPosition.x > center.x   // Camera is to the right of center
+    useFrontZ = cameraPosition.z > center.z      // Camera is in front
+  }
 
   // Define the outer prism edges (closer to cube - 50% of original distance)
   const gap = 0.075 // Distance from cube surface to dimension line (reduced by 50%)
@@ -284,6 +687,13 @@ export interface ModelViewerProps {
   onPointClick?: (point: THREE.Vector3) => void
   onDimensionClick?: (dimension: { label: string, start_point: THREE.Vector3, end_point: THREE.Vector3, value: number }) => void
   showDimensions?: boolean
+  customMeasurements?: CustomMeasurement[]
+  temporaryMeasurement?: { start: THREE.Vector3, end?: THREE.Vector3 } | null
+  measurementMode?: boolean
+  onMeasurementSelect?: (measurement: CustomMeasurement) => void
+  onMeasurementHover?: (measurementId: string, hovered: boolean) => void
+  selectedMeasurementId?: string
+  hoveredMeasurementId?: string
 }
 
 export default function ModelViewer({ 
@@ -291,7 +701,14 @@ export default function ModelViewer({
   className = "w-full h-96", 
   onPointClick,
   onDimensionClick,
-  showDimensions = true 
+  showDimensions = true,
+  customMeasurements,
+  temporaryMeasurement,
+  measurementMode,
+  onMeasurementSelect,
+  onMeasurementHover,
+  selectedMeasurementId,
+  hoveredMeasurementId
 }: ModelViewerProps) {
   const [error, setError] = useState<string | null>(null)
 
@@ -301,9 +718,10 @@ export default function ModelViewer({
         camera={{ position: [2, 2, 2], fov: 50 }}
         style={{ background: '#fafafa' }}
       >
-        <ambientLight intensity={0.6} />
-        <directionalLight position={[10, 10, 5]} intensity={0.8} />
-        <directionalLight position={[-10, -10, -5]} intensity={0.3} />
+        <ambientLight intensity={0.8} />
+        <directionalLight position={[10, 10, 5]} intensity={1.0} />
+        <directionalLight position={[-10, -10, -5]} intensity={0.4} />
+        <pointLight position={[0, 10, 0]} intensity={0.5} />
         
         <Suspense fallback={<LoadingFallback />}>
           <Center>
@@ -315,12 +733,26 @@ export default function ModelViewer({
                 onPointClick={onPointClick}
                 onDimensionClick={onDimensionClick}
                 showDimensions={showDimensions}
+                customMeasurements={customMeasurements}
+                temporaryMeasurement={temporaryMeasurement}
+                measurementMode={measurementMode}
+                onMeasurementSelect={onMeasurementSelect}
+                onMeasurementHover={onMeasurementHover}
+                selectedMeasurementId={selectedMeasurementId}
+                hoveredMeasurementId={hoveredMeasurementId}
               />
             ) : (
               <FallbackModel 
                 onPointClick={onPointClick}
                 onDimensionClick={onDimensionClick}
                 showDimensions={showDimensions}
+                customMeasurements={customMeasurements}
+                temporaryMeasurement={temporaryMeasurement}
+                measurementMode={measurementMode}
+                onMeasurementSelect={onMeasurementSelect}
+                onMeasurementHover={onMeasurementHover}
+                selectedMeasurementId={selectedMeasurementId}
+                hoveredMeasurementId={hoveredMeasurementId}
               />
             )}
           </Center>
